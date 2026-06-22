@@ -55,6 +55,15 @@ async def _push_wechat(user_key: str, text: str) -> bool:
     return False
 
 
+async def notify_owner(text: str) -> None:
+    """把告警推给 owner（配了哪个渠道就推哪个，可同时 TG+微信）。失败只记日志、不抛。"""
+    s = get_settings()
+    if s.owner_tg_id:
+        await _push_telegram(str(s.owner_tg_id), text)
+    if s.owner_wx_key:
+        await _push_wechat(s.owner_wx_key, text)
+
+
 async def push_to_channel(channel: Optional[str], push_target: Optional[str], text: str) -> bool:
     """按 nonce 记录的渠道把 text 推给用户。无渠道信息（老链接）则跳过。"""
     if not channel or not push_target:

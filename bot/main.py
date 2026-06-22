@@ -32,7 +32,7 @@ from telegram.ext import (
 from bot import flows, ui
 from bot.agent import OrderingAgent
 from bot.mcp_client import LuckinMCPClient
-from core import asr, db
+from core import admin, asr, db, push
 from core.config import get_settings, login_base_url
 from core.geo import wgs84_to_gcj02
 
@@ -137,6 +137,19 @@ async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text("点下方按钮用手机号登录（填手机号 + 短信验证码）。链接 15 分钟内有效。",
                                     reply_markup=kb)
+
+
+async def cmd_whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(f"你的 Telegram id：`{update.effective_user.id}`",
+                                    parse_mode="Markdown")
+
+
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not admin.is_owner_tg(update.effective_user.id):
+        return  # 非 owner：静默忽略
+    parts = (update.message.text or "").split(maxsplit=1)
+    await update.message.reply_text(admin.admin_command(parts[1] if len(parts) > 1 else ""),
+                                    parse_mode="Markdown")
 
 
 async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -252,7 +265,9 @@ async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
-    db.touch_user(uid, "tg", update.effective_user.full_name)
+    if db.touch_user(uid, "tg", update.effective_user.full_name):
+        context.application.create_task(push.notify_owner(
+            f"🆕 新用户(TG)：{update.effective_user.full_name or uid}（{uid}）"))
     reason = db.gate_message(uid, db.today_cst())  # 封禁 / 每日次数上限（护 API 预算）
     if reason:
         await update.message.reply_text(reason)
@@ -266,7 +281,9 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if voice is None:
         return
     uid = update.effective_user.id
-    db.touch_user(uid, "tg", update.effective_user.full_name)
+    if db.touch_user(uid, "tg", update.effective_user.full_name):
+        context.application.create_task(push.notify_owner(
+            f"🆕 新用户(TG)：{update.effective_user.full_name or uid}（{uid}）"))
     reason = db.gate_message(uid, db.today_cst())  # 闸在转写前，过限不花 ASR
     if reason:
         await update.message.reply_text(reason)
@@ -319,6 +336,8 @@ async def _handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text0
         result = await AGENT.step(messages, rec.token)
     except Exception as e:
         log.exception("agent step failed")
+        context.application.create_task(push.notify_owner(
+            f"🐞 TG 点单出错（user {update.effective_user.id}）：{str(e)[:200]}"))
         await update.message.reply_text(f"出错了：{e}")
         return
     context.user_data["messages"] = result.messages
@@ -421,6 +440,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("coupon", cmd_coupon))
     app.add_handler(CommandHandler("here", cmd_here))
+    app.add_handler(CommandHandler("whoami", cmd_whoami))
+    app.add_handler(CommandHandler("admin", cmd_admin))
     app.add_handler(MessageHandler(filters.LOCATION, on_location))
     app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^order:"))
     app.add_handler(CallbackQueryHandler(on_cancel_select, pattern=r"^cancel:"))

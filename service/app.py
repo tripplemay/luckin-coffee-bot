@@ -31,7 +31,7 @@ from pydantic import BaseModel
 from bot import flows
 from bot.agent import OrderingAgent
 from bot.mcp_client import LuckinMCPClient
-from core import amap, asr, coupon, db
+from core import admin, amap, asr, coupon, db, push
 from core.config import get_settings, login_base_url
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -108,7 +108,8 @@ class ChannelCore:
             if len(self._seen) > 5000:
                 self._seen.popitem(last=False)
         uid = _uid(user_key)
-        db.touch_user(uid, "wx", None)
+        if db.touch_user(uid, "wx", None):
+            asyncio.create_task(push.notify_owner(f"🆕 新用户(微信)：{user_key}（db {uid}）"))
         reason = db.gate_message(uid, db.today_cst())  # 封禁 / 每日次数上限（护 API 预算）
         if reason:
             return [_text(reason)]
@@ -116,8 +117,9 @@ class ChannelCore:
         async with st.lock:  # 串行化同一用户的并发消息
             try:
                 return await self._dispatch(user_key, st, text.strip())
-            except Exception:  # 兜底：不向用户泄露内部细节
+            except Exception as e:  # 兜底：不向用户泄露内部细节
                 log.exception("handle failed for %s", user_key)
+                asyncio.create_task(push.notify_owner(f"🐞 微信出错（{user_key}）：{str(e)[:200]}"))
                 return [_text("出错了，请稍后重试。")]
 
     async def _dispatch(self, key: str, st: UserState, text: str) -> list[dict]:
@@ -145,6 +147,14 @@ class ChannelCore:
 
         if text in ("/here", "/定位", "定位", "位置", "改位置", "重新定位"):
             return self._here(key)
+
+        if text == "/whoami":
+            return [_text(f"你的微信 user_key：{key}\n(db key：{_uid(key)})")]
+        if text.startswith("/admin"):
+            if not admin.is_owner_wx(key):
+                return [_text(WELCOME)]  # 非 owner：当普通帮助，不暴露
+            parts = text.split(maxsplit=1)
+            return [_text(admin.admin_command(parts[1] if len(parts) > 1 else ""))]
 
         rec = db.get_token(_uid(key))
         if not rec:

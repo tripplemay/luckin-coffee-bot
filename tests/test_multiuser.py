@@ -59,6 +59,36 @@ def test_list_users_aggregates():
     assert u["spend_today"] == 9.9 and u["orders"] == 1
 
 
+def test_is_owner(monkeypatch):
+    from core import admin
+    monkeypatch.setattr(admin, "get_settings",
+                        lambda: type("S", (), {"owner_tg_id": 123, "owner_wx_key": "wxkey"})())
+    assert admin.is_owner_tg(123) is True
+    assert admin.is_owner_tg(999) is False
+    assert admin.is_owner_wx("wxkey") is True
+    assert admin.is_owner_wx("other") is False
+    monkeypatch.setattr(admin, "get_settings",
+                        lambda: type("S", (), {"owner_tg_id": 0, "owner_wx_key": ""})())
+    assert admin.is_owner_tg(123) is False  # 未配置 → 关闭
+    assert admin.is_owner_wx("wxkey") is False
+
+
+def test_admin_command():
+    from core import admin
+    db.touch_user(5555, "tg", "Carol")
+    db.incr_usage(5555, db.today_cst())
+    assert "概览" in admin.admin_command("")
+    assert "用户" in admin.admin_command("users")
+    assert "已设" in admin.admin_command("limit 5555 30 10")
+    assert db.get_user_limits(5555) == (30.0, 10)
+    assert "封禁" in admin.admin_command("block 5555")
+    assert db.is_blocked(5555) is True
+    assert "解封" in admin.admin_command("unblock 5555")
+    assert db.is_blocked(5555) is False
+    assert "用法" in admin.admin_command("nonsense")
+    assert "参数错误" in admin.admin_command("limit 5555 abc 10")
+
+
 def test_trim_history_keeps_system_and_user_boundary():
     msgs = [{"role": "system", "content": "sys"}]
     for i in range(60):
