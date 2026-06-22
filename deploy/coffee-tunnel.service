@@ -1,0 +1,15 @@
+[Unit]
+Description=cloudflared tunnel for the Luckin login page (publishes web/.public_url)
+After=network-online.target coffee-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/coffee-bot
+ExecStart=/bin/bash /opt/coffee-bot/deploy/tunnel.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

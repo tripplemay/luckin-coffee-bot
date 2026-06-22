@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 from datetime import datetime
 
 from telegram import (
@@ -31,7 +32,7 @@ from bot import flows, ui
 from bot.agent import OrderingAgent
 from bot.mcp_client import LuckinMCPClient
 from core import db
-from core.config import get_settings
+from core.config import get_settings, login_base_url
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bot")
@@ -61,12 +62,21 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     parts = (update.message.text or "").split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        await update.message.reply_text("用法：/login <你的瑞幸Token>")
+    if len(parts) >= 2 and parts[1].strip():  # 粘贴 token 兜底
+        db.set_token(update.effective_user.id, parts[1].strip())
+        await update.message.reply_text("✅ 登录成功，已安全保存。分享位置后就能点单啦～",
+                                        reply_markup=ui.location_keyboard())
         return
-    db.set_token(update.effective_user.id, parts[1].strip())
-    await update.message.reply_text("✅ 登录成功，已安全保存。分享位置后就能点单啦～",
-                                    reply_markup=ui.location_keyboard())
+    base = login_base_url()  # 无参数 → 手机号登录链接
+    if not base:
+        await update.message.reply_text("登录页未配置。用法：/login <你的瑞幸Token>")
+        return
+    nonce = secrets.token_urlsafe(12)
+    db.create_login_nonce(nonce, update.effective_user.id)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+        "🔑 手机号登录（免粘贴）", url=f"{base}/login?t={nonce}")]])
+    await update.message.reply_text("点下方按钮用手机号登录（填手机号 + 短信验证码）。链接 15 分钟内有效。",
+                                    reply_markup=kb)
 
 
 async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

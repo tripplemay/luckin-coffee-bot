@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>瑞幸登录</title>
+  <script src="https://static.geetest.com/v4/gt4.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, "PingFang SC", sans-serif; margin: 0; padding: 18px; background: #0b0b0f; color: #eee; }
+    h1 { font-size: 19px; }
+    .sub { color: #9aa; font-size: 13px; margin-bottom: 14px; }
+    .card { background: #16161d; border-radius: 12px; padding: 16px; }
+    label { display: block; font-size: 12px; color: #9aa; margin: 10px 0 4px; }
+    input { width: 100%; padding: 13px; border-radius: 8px; border: 1px solid #333; background: #0e0e14; color: #fff; font-size: 16px; }
+    .row { display: flex; gap: 8px; }
+    button { width: 100%; padding: 14px; margin-top: 14px; border: 0; border-radius: 999px; font-size: 16px; font-weight: 600;
+             color: #fff; background: linear-gradient(90deg,#4f63ff,#2f89ff); }
+    button:disabled { opacity: .5; }
+    #ok { display:none; text-align:center; padding:28px 12px; }
+    #ok .big { font-size: 40px; } #ok .t { font-size: 18px; margin-top: 10px; }
+    pre { white-space: pre-wrap; word-break: break-all; font-size: 11px; color: #7d8; margin-top: 12px; }
+    .err { color: #ff6b6b; }
+  </style>
+</head>
+<body>
+  <h1>☕ 瑞幸账号登录</h1>
+  <div class="sub">登录后回到机器人即可点单，无需手动复制 Token。</div>
+
+  <div class="card" id="form">
+    <div class="row">
+      <div style="flex:0 0 78px"><label>区号</label><input id="callCode" value="86" /></div>
+      <div style="flex:1"><label>手机号</label><input id="mobile" inputmode="numeric" placeholder="11 位手机号" /></div>
+    </div>
+    <button id="sendBtn">获取验证码</button>
+    <label>短信验证码</label>
+    <input id="code" inputmode="numeric" placeholder="6 位验证码" />
+    <button id="loginBtn">登录</button>
+    <pre id="log"></pre>
+  </div>
+
+  <div class="card" id="ok"><div class="big">✅</div><div class="t">登录成功！</div><div class="sub" style="margin-top:8px">回到机器人对话发消息即可点单。可以关掉本页了。</div></div>
+
+  <div id="tongdunCaptcha" style="display:none"></div>
+<script>
+const $ = (id) => document.getElementById(id);
+const NONCE = new URLSearchParams(location.search).get("t") || "";
+function logLine(m, cls){ const t=new Date().toTimeString().slice(0,8); $("log").innerHTML += `\n[${t}] `+(cls?`<span class="${cls}">${m}</span>`:m); }
+
+// ---- 同盾指纹（兜底） ----
+window._fmOpt = { partner:"luckincoffee", appName:"luckincoffee_xcx", fmb:false, initialTime:Date.now(),
+  token:"luckincoffee-"+Date.now()+"-"+Math.random().toString(16).slice(2), env:1, fpHost:"https://fp.tongdun.net" };
+(function(){ const s=document.createElement("script"); s.src="https://static.tongdun.net/captcha/main/tdc.js?ver=1.0&t="+Math.floor(Date.now()/36e5); s.async=true; document.head.appendChild(s); })();
+function blackbox(){ try{ return (window._fmOpt.getinfo&&window._fmOpt.getinfo())||""; }catch{ return ""; } }
+
+// ---- 极验滑块（兜底，实测多数账号不触发） ----
+let gee=null;
+function solveSlider(){ return new Promise((res)=>{
+  if(typeof initGeetest4!=="function") return res("");
+  const run=(c)=>{ gee=c; c.onSuccess(()=>{const v=c.getValidate(); res(typeof v==="string"?v:JSON.stringify(v));})
+    .onClose(()=>res("")).onError(()=>res("")); c.showCaptcha(); };
+  if(gee) return run(gee);
+  initGeetest4({captchaId:"60d64df63d51f68279ed79e899a3f812",product:"bind",language:"zho",riskType:"slide",hideSuccess:false}, run);
+});}
+
+async function api(path, body){ const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})}); return r.json().catch(()=>({})); }
+
+async function sendCode(afterSlider){
+  const mobile=$("mobile").value.trim(), callCode=$("callCode").value.trim()||"86";
+  if(mobile.length<6) return logLine("请输入手机号","err");
+  const res=await api("/api/validcode",{mobile,callCode,blackbox:blackbox()});
+  if(res&&res.content&&res.content.validate===true){
+    if(afterSlider) return logLine("仍要求验证，停止","err");
+    logLine("需要滑块验证…"); const vp=await solveSlider();
+    if(!vp) return logLine("未完成滑块","err");
+    const sv=await api("/api/sliderVerify",{mobile,countryNo:callCode,blackbox:blackbox(),verifyParams:vp});
+    if(sv&&sv.content&&sv.content.validate===true) return sendCode(true);
+    return logLine("滑块校验未过","err");
+  }
+  logLine("📩 验证码已发送");
+}
+
+async function login(){
+  const mobile=$("mobile").value.trim(), callCode=$("callCode").value.trim()||"86", code=$("code").value.trim();
+  if(code.length<4) return logLine("请输入验证码","err");
+  const r=await api("/api/loginAi",{mobile,code,countryNo:callCode});
+  if(!(r&&r.content&&r.content.userId)) return logLine("登录失败："+((r&&r.msg)||""),"err");
+  logLine("登录成功，正在绑定…");
+  const tok=await api("/api/getToken",{t:NONCE});
+  if(tok&&tok.stored){ $("form").style.display="none"; $("ok").style.display="block"; }
+  else if(tok&&tok.ok){ logLine("拿到 token 但绑定失败（链接可能已过期，请回机器人重新发 /login）","err"); }
+  else { logLine("获取 token 失败","err"); }
+}
+
+$("sendBtn").onclick=()=>sendCode(false).catch(e=>logLine("异常:"+e,"err"));
+$("loginBtn").onclick=()=>login().catch(e=>logLine("异常:"+e,"err"));
+if(!NONCE) logLine("缺少登录票据(nonce)，请从机器人里的 /login 链接进入。","err");
+</script>
+</body>
+</html>

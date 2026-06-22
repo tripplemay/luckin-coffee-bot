@@ -15,6 +15,7 @@ import base64
 import hashlib
 import logging
 import re
+import secrets
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -31,7 +32,7 @@ from bot import flows
 from bot.agent import OrderingAgent
 from bot.mcp_client import LuckinMCPClient
 from core import db
-from core.config import get_settings
+from core.config import get_settings, login_base_url
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("service")
@@ -120,11 +121,16 @@ class ChannelCore:
 
         if text.startswith("/login"):
             parts = text.split(maxsplit=1)
-            if len(parts) < 2 or not parts[1].strip():
-                return [_text("用法：/login <你的瑞幸Token>")]
-            db.set_token(_uid(key), parts[1].strip())
-            st.pending_order = st.pending_price = st.pending_cancel = None  # 换号作废挂起态
-            return [_text("✅ 登录成功，已安全保存。\n发『/loc 经度,纬度』设位置，再说想喝什么～")]
+            if len(parts) >= 2 and parts[1].strip():  # 粘贴 token 兜底
+                db.set_token(_uid(key), parts[1].strip())
+                st.pending_order = st.pending_price = st.pending_cancel = None
+                return [_text("✅ 登录成功，已安全保存。\n发『/loc 你的地址』设位置，再说想喝什么～")]
+            base = login_base_url()  # 无参数 → 发手机号登录链接（免粘贴）
+            if not base:
+                return [_text("登录页未配置。可先用 /login <你的瑞幸Token> 粘贴登录。")]
+            nonce = secrets.token_urlsafe(12)
+            db.create_login_nonce(nonce, _uid(key))
+            return [_text(f"点链接用手机号登录（填手机号+短信验证码，免粘贴 Token）：\n{base}/login?t={nonce}\n链接 15 分钟内有效。")]
 
         if text in ("/start", "/help", "help", "你好", "在吗"):
             return [_text(WELCOME)]

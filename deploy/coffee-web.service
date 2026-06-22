@@ -1,0 +1,15 @@
+[Unit]
+Description=Luckin phone-login web page
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/coffee-bot
+ExecStart=/opt/coffee-bot/.venv/bin/uvicorn web.app:app --host 127.0.0.1 --port 8200
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

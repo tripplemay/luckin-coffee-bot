@@ -47,6 +47,15 @@ def test_order_history():
     assert [o["order_id"] for o in db.list_orders(3002)] == ["o-200"]
 
 
+def test_login_nonce():
+    db.create_login_nonce("n1", 5005)
+    assert db.consume_login_nonce("n1") == 5005
+    assert db.consume_login_nonce("n1") is None  # 单次：第二次取不到
+    assert db.consume_login_nonce("nope") is None
+    db.create_login_nonce("n2", 6006)
+    assert db.consume_login_nonce("n2", max_age=-1) is None  # 过期
+
+
 def test_location_persistence():
     assert db.get_location(7001) is None
     db.set_location(7001, 116.39, 39.98, "北京安贞")

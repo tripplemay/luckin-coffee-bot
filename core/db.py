@@ -51,6 +51,11 @@ CREATE TABLE IF NOT EXISTS user_location (
     label       TEXT,
     updated_at  INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS login_nonce (
+    nonce       TEXT    PRIMARY KEY,
+    user_key    INTEGER NOT NULL,
+    created_at  INTEGER NOT NULL
+);
 """
 
 
@@ -145,6 +150,26 @@ def list_orders(tg_user_id: int, limit: int = 5) -> list[dict]:
             (tg_user_id, limit),
         ).fetchall()
     return [{"order_id": r["order_id"], "summary": r["summary"], "created_at": r["created_at"]} for r in rows]
+
+
+def create_login_nonce(nonce: str, user_key: int) -> None:
+    """登录页用：把一次性登录链接绑定到 bot 用户(已折算成 db key)。"""
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO login_nonce (nonce, user_key, created_at) VALUES (?, ?, ?)",
+            (nonce, user_key, int(time.time())),
+        )
+
+
+def consume_login_nonce(nonce: str, max_age: int = 900) -> Optional[int]:
+    """取出并删除 nonce，返回绑定的 user_key（单次、15 分钟内有效）。"""
+    with _connect() as conn:
+        row = conn.execute("SELECT user_key, created_at FROM login_nonce WHERE nonce=?", (nonce,)).fetchone()
+        if row:
+            conn.execute("DELETE FROM login_nonce WHERE nonce=?", (nonce,))
+    if not row or int(time.time()) - row["created_at"] > max_age:
+        return None
+    return row["user_key"]
 
 
 def set_location(tg_user_id: int, lng: float, lat: float, label: Optional[str] = None) -> None:

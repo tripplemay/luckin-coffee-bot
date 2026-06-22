@@ -25,3 +25,15 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def login_base_url() -> str:
+    """登录页公网 URL：优先读 cloudflared 写入的 web/.public_url，回退 .env 的 PUBLIC_BASE_URL。"""
+    for p in ("web/.public_url", "/opt/coffee-bot/web/.public_url"):
+        try:
+            u = open(p, encoding="utf-8").read().strip()
+            if u:
+                return u.rstrip("/")
+        except OSError:
+            continue
+    return get_settings().public_base_url.rstrip("/")
