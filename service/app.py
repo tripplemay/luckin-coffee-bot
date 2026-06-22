@@ -20,7 +20,6 @@ import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
 from io import BytesIO
 from typing import Optional
 
@@ -268,7 +267,7 @@ class ChannelCore:
         if order_id:
             db.record_order(_uid(key), order_id, summary)
             if record_price:  # 微信版无轮询，下单即记账（偏保守，安全）
-                db.record_spend(_uid(key), datetime.now().strftime("%Y-%m-%d"), record_price, order_id)
+                db.record_spend(_uid(key), db.today_cst(), record_price, order_id)
 
         closing = await self._safe_resume(st, call, token, create_result)
         acts.append(_text(text))

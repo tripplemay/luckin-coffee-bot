@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
 from typing import Any, Optional
 
 from telegram import Bot
@@ -68,7 +67,7 @@ def spend_guard(tg_user_id: int, price: Optional[float]) -> Optional[str]:
     if price is None:
         return None
     limit = db.effective_spend_limit(tg_user_id)  # 每用户覆盖值，未设则全局默认
-    day = datetime.now().strftime("%Y-%m-%d")
+    day = db.today_cst()  # 与消息限频同一"天"边界（固定+08:00），避免 UTC 服务器上提前重置
     already = db.spend_today(tg_user_id, day)
     if already + price > limit:
         return f"超出单日消费上限（已花 ¥{already:.2f}，本单 ¥{price:.2f}，上限 ¥{limit:.0f}）。"
@@ -200,7 +199,7 @@ async def poll_order_until_ready(bot: Bot, chat_id: int, mcp: LuckinMCPClient, t
             except Exception as e:
                 log.warning("push status failed: %s", e)
         if not recorded and spend_user_id is not None and spend_amount and status in _PAID_STATUS:
-            db.record_spend(spend_user_id, datetime.now().strftime("%Y-%m-%d"), spend_amount, order_id)
+            db.record_spend(spend_user_id, db.today_cst(), spend_amount, order_id)
             recorded = True
         if status in _TERMINAL_STATUS:
             return

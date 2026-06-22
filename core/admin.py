@@ -67,6 +67,8 @@ def admin_command(args: str) -> str:
             uk, spend, msgs = int(parts[1]), float(parts[2]), int(parts[3])
         except ValueError:
             return "参数错误。用法：/admin limit <key> <消费上限> <消息上限>"
+        if spend < 0 or msgs < 1:
+            return "消费上限须 ≥0、消息上限须 ≥1（要禁用请用 /admin block）"
         db.set_user_limit(uk, spend, msgs)
         return f"✅ 已设用户 {uk}：消费上限 ¥{spend:.0f}/天，消息 {msgs} 条/天"
     if sub in ("block", "unblock") and len(parts) >= 2:

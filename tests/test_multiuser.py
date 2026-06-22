@@ -27,6 +27,14 @@ def test_block_and_usage():
     assert db.usage_today(7001, "2026-06-24") == 0  # 跨天独立
 
 
+def test_gate_atomic_caps_exactly_at_limit():
+    u, day = 9191, "2026-06-25"
+    db.set_user_limit(u, daily_msgs=3)
+    results = [db.gate_message(u, day) for _ in range(7)]
+    assert sum(1 for r in results if r is None) == 3   # 恰好放行 limit 次
+    assert db.usage_today(u, day) == 3                 # 超限回补，计数不漂移到上限以上
+
+
 def test_user_limits_override_and_effective():
     s = get_settings()
     assert db.effective_spend_limit(8888) == s.daily_spend_limit  # 未设 → 全局

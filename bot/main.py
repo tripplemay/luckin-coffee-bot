@@ -11,7 +11,6 @@ import asyncio
 import logging
 import secrets
 import time
-from datetime import datetime
 
 from telegram import (
     InlineKeyboardButton,
@@ -338,7 +337,7 @@ async def _handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text0
         log.exception("agent step failed")
         context.application.create_task(push.notify_owner(
             f"🐞 TG 点单出错（user {update.effective_user.id}）：{str(e)[:200]}"))
-        await update.message.reply_text(f"出错了：{e}")
+        await update.message.reply_text("出错了，请稍后重试。")  # 不向用户回显内部异常
         return
     context.user_data["messages"] = result.messages
 
@@ -399,7 +398,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         db.record_order(q.from_user.id, order_id, pending.get("summary"))
         # 已被券/余额全额支付(needPay=false)立即记账；需支付的单留给轮询在确认到账后记
         if not need_pay and record_price:
-            db.record_spend(q.from_user.id, datetime.now().strftime("%Y-%m-%d"), record_price, order_id)
+            db.record_spend(q.from_user.id, db.today_cst(), record_price, order_id)
     await q.message.reply_text(text)
     if need_pay and qr:
         page_kb = (InlineKeyboardMarkup([[InlineKeyboardButton("📱 同屏无法扫码？点此打开支付页", url=pay_page)]])

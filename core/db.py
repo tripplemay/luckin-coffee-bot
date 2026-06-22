@@ -396,13 +396,23 @@ def effective_msg_limit(user_key: int) -> int:
 
 
 def gate_message(user_key: int, day: str) -> Optional[str]:
-    """每条入站消息的准入闸：封禁 / 超每日次数 → 返回拒绝语；放行则计数并返回 None。"""
+    """每条入站消息的准入闸：封禁 / 超每日次数 → 返回拒绝语；放行则**原子**计数并返回 None。
+
+    用 INSERT ... ON CONFLICT ... RETURNING 一步自增并拿回计数，避免 check-then-act 竞态
+    （并发投递时各请求拿到唯一计数）；超限的请求回补一次，使计数不漂移到上限以上。
+    """
     if is_blocked(user_key):
         return "你已被管理员停用本服务。"
     limit = effective_msg_limit(user_key)
-    if usage_today(user_key, day) >= limit:
-        return f"今日使用次数已达上限（{limit} 次/天），明天再来～"
-    incr_usage(user_key, day)
+    with _connect() as conn:
+        row = conn.execute(
+            "INSERT INTO usage_log (user_key, day, msg_count) VALUES (?, ?, 1) "
+            "ON CONFLICT(user_key, day) DO UPDATE SET msg_count = msg_count + 1 RETURNING msg_count",
+            (user_key, day)).fetchone()
+        if int(row["msg_count"]) > limit:
+            conn.execute("UPDATE usage_log SET msg_count = msg_count - 1 WHERE user_key=? AND day=?",
+                         (user_key, day))
+            return f"今日使用次数已达上限（{limit} 次/天），明天再来～"
     return None
 
 
