@@ -1,6 +1,8 @@
 # secrets / local config
 .env
 *.db
+wechat/.wxsession.json
+wechat/node_modules/
 
 # python
 __pycache__/

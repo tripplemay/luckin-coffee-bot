@@ -1,0 +1,14 @@
+{
+  "name": "coffee-wechat-bridge",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "WeChat (wx-link / iLink) bridge for the Luckin coffee ordering bot",
+  "scripts": {
+    "start": "node bridge.mjs"
+  },
+  "dependencies": {
+    "wx-link": "^0.2.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
