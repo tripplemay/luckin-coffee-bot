@@ -98,6 +98,6 @@ def test_spend_guard():
     assert flows.spend_guard(2001, 50.0) is None
     assert flows.spend_guard(2001, 150.0) is not None
     # accumulation pushes over the limit
-    db.record_spend(2002, __import__("datetime").datetime.now().strftime("%Y-%m-%d"), 80.0, "o")
+    db.record_spend(2002, db.today_cst(), 80.0, "o")  # 与 spend_guard 同一天边界(CST)，避免 UTC CI 错位
     assert flows.spend_guard(2002, 30.0) is not None  # 80 + 30 > 100
     assert flows.spend_guard(2002, 10.0) is None       # 80 + 10 <= 100
