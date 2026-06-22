@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "wx-link": "^0.2.0",
-    "qrcode-terminal": "^0.12.0"
+    "qrcode-terminal": "^0.12.0",
+    "silk-wasm": "^3.7.1"
   }
 }

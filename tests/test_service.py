@@ -152,3 +152,28 @@ async def test_msg_id_dedup(monkeypatch):
     r1 = await core.handle(u, "/login T", msg_id="m1")
     assert "登录成功" in r1[0]["text"]
     assert await core.handle(u, "/login T", msg_id="m1") == []  # 同一条重投不重复处理
+
+
+def test_voice_text_passthrough_echoes():
+    """微信自带转写(voice_item.text)→ /voice 直接用，回显🎧 并走同一套逻辑（省 ASR）。"""
+    from fastapi.testclient import TestClient
+
+    from service.app import app
+    with TestClient(app) as client:
+        r = client.post("/voice", json={"user_key": "wx_voice_1", "text": "你好", "msg_id": "v1"})
+    assert r.status_code == 200
+    acts = r.json()["actions"]
+    assert acts[0]["text"].startswith("🎧 听到：你好")
+    assert len(acts) >= 2  # echo + handle 的回复
+
+
+def test_voice_audio_without_asr_gracefully(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from core import asr
+    from service.app import app
+    monkeypatch.setattr(asr, "asr_enabled", lambda: False)
+    with TestClient(app) as client:
+        r = client.post("/voice", json={"user_key": "wx_v2", "audio_b64": "AAAA"})
+    assert r.status_code == 200
+    assert "开启" in r.json()["actions"][0]["text"]

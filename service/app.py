@@ -32,7 +32,7 @@ from pydantic import BaseModel
 from bot import flows
 from bot.agent import OrderingAgent
 from bot.mcp_client import LuckinMCPClient
-from core import coupon, db
+from core import asr, coupon, db
 from core.config import get_settings, login_base_url
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -398,6 +398,13 @@ class MessageReq(BaseModel):
     msg_id: Optional[str] = None
 
 
+class VoiceReq(BaseModel):
+    user_key: str
+    audio_b64: str = ""   # 渠道解码后的音频（如 SILK→WAV）；与 text 二选一
+    text: str = ""        # 若渠道已带转写（如微信 voice_item.text）则直接给，省一次 ASR
+    msg_id: Optional[str] = None
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     db.init_db()  # 独立部署时也保证建表
@@ -408,13 +415,36 @@ app = FastAPI(title="coffee-channel-service", lifespan=_lifespan)
 CORE = ChannelCore()
 
 
-@app.post("/message")
-async def message(req: MessageReq, x_bridge_secret: str = Header(default="")):
+def _check_secret(x_bridge_secret: str) -> None:
     secret = get_settings().bridge_secret
     if secret and x_bridge_secret != secret:  # 配了 BRIDGE_SECRET 才校验（防本机其它进程冒充用户）
         raise HTTPException(status_code=401, detail="unauthorized")
+
+
+@app.post("/message")
+async def message(req: MessageReq, x_bridge_secret: str = Header(default="")):
+    _check_secret(x_bridge_secret)
     actions = await CORE.handle(req.user_key.strip(), req.text, req.msg_id)
     return {"actions": actions}
+
+
+@app.post("/voice")
+async def voice(req: VoiceReq, x_bridge_secret: str = Header(default="")):
+    """语音消息：拿到转写文本（渠道自带 or 我们 ASR）→ 回显🎧 → 走同一套点单逻辑。"""
+    _check_secret(x_bridge_secret)
+    text = (req.text or "").strip()
+    if not text and req.audio_b64:
+        if not asr.asr_enabled():
+            return {"actions": [_text("语音功能还没开启（需配置云 ASR），先打字告诉我吧～")]}
+        try:
+            text = (await asr.transcribe(base64.b64decode(req.audio_b64))).strip()
+        except Exception as e:
+            log.warning("voice transcribe failed for %s: %s", req.user_key, e)
+            return {"actions": [_text("没听清，要不打字告诉我？")]}
+    if not text:
+        return {"actions": [_text("没听清，要不打字告诉我？")]}
+    actions = await CORE.handle(req.user_key.strip(), text, req.msg_id)
+    return {"actions": [_text(f"🎧 听到：{text}")] + actions}
 
 
 @app.get("/health")
