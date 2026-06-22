@@ -44,7 +44,7 @@ python -m bot.main          # 长轮询启动
 
 ## 微信渠道
 经腾讯官方 **ClawBot / iLink**（个人号机器人）。需要 Node 18+。
-> ⚠️ wx-link 是**非官方、obfuscated** 的协议封装（数据走腾讯自家 `ilinkai.weixin.qq.com`）→ **务必用专用/小号**登录，当 beta 用。
+
 
 ```bash
 # 1) 渠道服务（Python）
@@ -52,7 +52,7 @@ uvicorn service.app:app --host 127.0.0.1 --port 8100
 # 2) 微信桥接（Node）—— 首次扫码登录
 cd wechat && npm install && SERVICE_URL=http://127.0.0.1:8100 node bridge.mjs   # 用小号扫码（可能要输配对码）
 ```
-登录后，**用小号的微信 → 我 → 设置 → 插件 → 微信ClawBot** 打开对话，发：
+登录后，**用微信 → 我 → 设置 → 插件 → 微信ClawBot** 打开对话，发：
 ```
 /login <你的瑞幸Token>
 /loc 成都天府五街999号      # 发「地址」自动定位（高德地理编码→GCJ-02），也支持 /loc 经度,纬度；位置会被记住
