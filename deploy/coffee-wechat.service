@@ -1,0 +1,16 @@
+[Unit]
+Description=Coffee WeChat bridge (wx-link / Tencent iLink)
+After=network-online.target coffee-service.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/coffee-bot/wechat
+EnvironmentFile=/opt/coffee-bot/.env
+ExecStart=/usr/bin/node bridge.mjs
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

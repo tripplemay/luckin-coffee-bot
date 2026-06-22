@@ -1,0 +1,17 @@
+[Unit]
+Description=Coffee channel service (FastAPI) backing the WeChat bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/coffee-bot
+ExecStart=/opt/coffee-bot/.venv/bin/uvicorn service.app:app --host 127.0.0.1 --port 8100
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

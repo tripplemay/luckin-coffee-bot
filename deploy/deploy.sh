@@ -6,4 +6,5 @@ git fetch --all --quiet
 git reset --hard origin/main
 .venv/bin/pip install -q -e .
 sudo systemctl restart coffee-bot
+sudo systemctl try-restart coffee-service coffee-wechat coffee-web || true
 echo "deployed $(git rev-parse --short HEAD)"
