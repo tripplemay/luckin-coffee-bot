@@ -71,6 +71,27 @@ def _coupon_login_kb(user_id: int, chat_id: int):
         "🎁 绑定领券登录", url=f"{base}/coupon-login?t={nonce}")]])
 
 
+def _location_link_kb(user_id: int, chat_id: int):
+    """网页一键定位按钮（GPS）+ 绑定 nonce，定位结果会回推到本对话。未配置登录页返回 None。"""
+    base = login_base_url()
+    if not base:
+        return None
+    nonce = secrets.token_urlsafe(12)
+    db.create_login_nonce(nonce, user_id, channel="tg", push_target=str(chat_id))
+    return InlineKeyboardMarkup([[InlineKeyboardButton(
+        "📍 一键获取当前位置", url=f"{base}/set-location?t={nonce}")]])
+
+
+async def cmd_here(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """发位置：手机原生分享（最佳）或网页 GPS 定位（桌面也行）。"""
+    await update.message.reply_text(
+        "把位置发我：手机点下方「📍 发送我的位置」最快，或用网页一键定位。",
+        reply_markup=ui.location_keyboard())
+    kb = _location_link_kb(update.effective_user.id, update.effective_chat.id)
+    if kb:
+        await update.message.reply_text("网页定位（桌面/没有定位按钮时）👇", reply_markup=kb)
+
+
 async def cmd_coupon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """领取每周免费福利券。未绑定领券登录则先给绑定链接（带风险提示）。只领免费券，绝不扣钱。"""
     from core import coupon
@@ -230,8 +251,12 @@ async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if (update.message.text or "").strip() in ("福利", "领券", "免费券", "领福利"):
+    text0 = (update.message.text or "").strip()
+    if text0 in ("福利", "领券", "免费券", "领福利"):
         await cmd_coupon(update, context)
+        return
+    if text0 in ("定位", "位置", "改位置", "重新定位"):
+        await cmd_here(update, context)
         return
     rec = _require_token(update.effective_user.id)
     if not rec:
@@ -247,6 +272,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if saved:
             context.user_data["location"] = (saved["lng"], saved["lat"])
             context.user_data["messages"] = AGENT.new_conversation((saved["lng"], saved["lat"]))
+        else:
+            await cmd_here(update, context)  # 从无位置 → 主动弹一键定位，别让 LLM 干巴巴地要
+            return
     messages = context.user_data.get("messages") or AGENT.new_conversation(context.user_data.get("location"))
     messages.append({"role": "user", "content": update.message.text})
     await context.bot.send_chat_action(update.effective_chat.id, "typing")
@@ -355,6 +383,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("orders", cmd_orders))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("coupon", cmd_coupon))
+    app.add_handler(CommandHandler("here", cmd_here))
     app.add_handler(MessageHandler(filters.LOCATION, on_location))
     app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^order:"))
     app.add_handler(CallbackQueryHandler(on_cancel_select, pattern=r"^cancel:"))

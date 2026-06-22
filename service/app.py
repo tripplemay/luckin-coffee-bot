@@ -139,6 +139,9 @@ class ChannelCore:
         if text in ("/福利", "/coupon", "福利", "领券", "免费券", "领福利"):
             return await self._coupon(key)
 
+        if text in ("/here", "/定位", "定位", "位置", "改位置", "重新定位"):
+            return self._here(key)
+
         rec = db.get_token(_uid(key))
         if not rec:
             return [_text("请先登录：/login <你的瑞幸Token>（open.lkcoffee.com 登录后复制 Token）。")]
@@ -197,7 +200,7 @@ class ChannelCore:
                 st.location = (saved["lng"], saved["lat"])
                 st.messages = self._agent.new_conversation(st.location)
             else:
-                return [_text("先发『/loc 你的地址』设置位置吧（如 /loc 成都天府五街999号），我才能帮你找附近门店。")]
+                return self._here(key)  # 无任何位置 → 给一键定位链接（含 /loc 兜底）
         if st.messages is None:
             st.messages = self._agent.new_conversation(st.location)
         st.messages.append({"role": "user", "content": text})
@@ -279,6 +282,16 @@ class ChannelCore:
                           "⚠️ 第三方代领属灰色地带，仅个人低频、只领免费券、绝不扣钱。\n"
                           f"点链接绑定（手机号+短信）：\n{base}/coupon-login?t={nonce}\n链接 15 分钟内有效。")]
         return [_text(coupon.format_claim_result(res))]
+
+    def _here(self, key: str) -> list[dict]:
+        """发一键定位网页链接（消费/桌面都行）；微信文字桥拿不到 GPS，故走网页。"""
+        base = login_base_url()
+        if not base:
+            return [_text("定位页未配置。可发『/loc 你的地址』设置位置。")]
+        nonce = secrets.token_urlsafe(12)
+        db.create_login_nonce(nonce, _uid(key), channel="wx", push_target=key)
+        return [_text(f"点链接一键定位（手机浏览器打开、允许定位）：\n{base}/set-location?t={nonce}\n"
+                      "或直接发『/loc 你的地址』（如 /loc 成都天府五街999号）。链接 15 分钟内有效。")]
 
     async def _geocode(self, address: str) -> Optional[tuple]:
         """高德地理编码：地址 → (lng, lat, formatted)，GCJ-02（与瑞幸一致）。未配 key/失败返回 None。"""

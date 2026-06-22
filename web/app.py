@@ -20,7 +20,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from core import db, push
+from core.config import get_settings
 from core.coupon import ConsumerClient
+from core.geo import wgs84_to_gcj02
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("weblogin")
@@ -38,6 +40,7 @@ BASE_HEADERS = {
 
 LOGIN_HTML = (Path(__file__).parent / "login.html").read_text(encoding="utf-8")
 COUPON_LOGIN_HTML = (Path(__file__).parent / "coupon_login.html").read_text(encoding="utf-8")
+LOCATION_HTML = (Path(__file__).parent / "location.html").read_text(encoding="utf-8")
 SESSIONS: dict[str, dict] = {}  # sid -> {client, csrf}
 # 领券登录客户端：按**一次性 nonce**(登录票据)隔离，绝不用共享 sid —— 否则两个并发用户会串号/抢验证码
 CONSUMER_CLIENTS: dict[str, ConsumerClient] = {}  # nonce -> 消费版 H5 客户端
@@ -205,6 +208,57 @@ async def coupon_login(req: Request):
         CONSUMER_CLIENTS.pop(token, None)  # 登录成功即清掉内存会话（防泄漏/复用）；失败则保留供重试验证码
     return JSONResponse({"ok": ok, "stored": stored,
                          "msg": resp.get("msg", "") if isinstance(resp, dict) else ""})
+
+
+async def _regeo(lng: float, lat: float) -> str:
+    """高德逆地理编码：GCJ-02 坐标 → 可读地址；未配 key/失败则回退默认标签。"""
+    key = get_settings().amap_key
+    if not key:
+        return "我的位置"
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get("https://restapi.amap.com/v3/geocode/regeo",
+                            params={"location": f"{lng},{lat}", "key": key, "radius": 200})
+            d = r.json()
+        if d.get("status") == "1":
+            addr = (d.get("regeocode") or {}).get("formatted_address")
+            if isinstance(addr, str) and addr:
+                return addr
+    except Exception as e:
+        log.warning("regeo failed: %s", e)
+    return "我的位置"
+
+
+@app.get("/set-location", response_class=HTMLResponse)
+async def location_page(req: Request):
+    return HTMLResponse(LOCATION_HTML)
+
+
+@app.post("/api/location")
+async def set_location(req: Request):
+    b = await req.json()
+    # 先校验坐标，再消费 nonce —— 坏请求不该烧掉一次性票据（可重试）
+    try:
+        lat, lng = float(b["lat"]), float(b["lng"])
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse({"ok": False, "msg": "坐标无效"}, status_code=400)
+    if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+        return JSONResponse({"ok": False, "msg": "坐标超出范围"}, status_code=400)
+    nonce = str((b or {}).get("t") or "").strip()
+    rec = db.consume_login_nonce(nonce)
+    if rec is None:
+        return JSONResponse({"ok": False, "msg": "定位链接无效或已过期，请回机器人重发"}, status_code=400)
+    # 浏览器定位是 WGS-84，瑞幸按 GCJ-02 检索门店 → 服务端统一转换（与 Telegram 原生定位同源逻辑）
+    gcj_lng, gcj_lat = wgs84_to_gcj02(lng, lat)
+    label = await _regeo(gcj_lng, gcj_lat)
+    db.set_location(rec.user_key, gcj_lng, gcj_lat, label)
+    log.info("location set for user_key %s via nonce", rec.user_key)
+    try:
+        await push.push_to_channel(rec.channel, rec.push_target,
+                                   f"📍 已定位：{label}，直接说想喝什么就行～")
+    except Exception as e:
+        log.warning("location push failed: %s", e)
+    return JSONResponse({"ok": True, "label": label})
 
 
 @app.get("/health")

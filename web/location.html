@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>瑞幸点单 · 一键定位</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, "PingFang SC", sans-serif; margin: 0; padding: 18px; background: #0b0b0f; color: #eee; }
+    h1 { font-size: 19px; }
+    .sub { color: #9aa; font-size: 13px; margin-bottom: 14px; }
+    .card { background: #16161d; border-radius: 12px; padding: 20px; text-align: center; }
+    .pin { font-size: 44px; }
+    button { width: 100%; padding: 14px; margin-top: 16px; border: 0; border-radius: 999px; font-size: 16px; font-weight: 600;
+             color: #fff; background: linear-gradient(90deg,#4f63ff,#2f89ff); }
+    button:disabled { opacity: .5; }
+    .t { font-size: 16px; margin-top: 12px; }
+    .addr { color: #7d8; font-size: 14px; margin-top: 6px; word-break: break-all; }
+    .hint { color: #9aa; font-size: 12px; margin-top: 14px; line-height: 1.6; }
+    .err { color: #ff6b6b; }
+    #ok { display:none; }
+  </style>
+</head>
+<body>
+  <h1>📍 一键定位</h1>
+  <div class="sub">授权定位后，机器人会记住你的位置，帮你找最近的瑞幸门店。</div>
+
+  <div class="card" id="form">
+    <div class="pin">📍</div>
+    <button id="goBtn">获取我的当前位置</button>
+    <div class="hint" id="msg">点上方按钮并允许浏览器获取定位（需在手机/支持定位的浏览器中打开）。<br>不方便用定位？回到对话发『/loc 你的地址』也行。</div>
+  </div>
+
+  <div class="card" id="ok">
+    <div class="pin">✅</div>
+    <div class="t">定位成功！</div>
+    <div class="addr" id="okAddr"></div>
+    <div class="hint">已通知机器人，回到对话直接说想喝什么就行。可以关掉本页了。</div>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const NONCE = new URLSearchParams(location.search).get("t") || "";
+function msg(m, cls){ $("msg").innerHTML = cls ? `<span class="${cls}">${m}</span>` : m; }
+
+async function post(path, body){
+  const r = await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});
+  return r.json().catch(()=>({}));
+}
+
+function locate(){
+  if(!NONCE) return msg("缺少定位票据，请从机器人的定位按钮进入。","err");
+  if(!navigator.geolocation) return msg("当前浏览器不支持定位，请回对话发『/loc 你的地址』。","err");
+  $("goBtn").disabled = true; msg("正在获取定位…请允许浏览器的定位权限。");
+  navigator.geolocation.getCurrentPosition(async (pos)=>{
+    const { latitude, longitude } = pos.coords;
+    const res = await post("/api/location", { t: NONCE, lat: latitude, lng: longitude });
+    if(res && res.ok){
+      $("form").style.display="none"; $("ok").style.display="block";
+      $("okAddr").textContent = res.label || "";
+    } else {
+      $("goBtn").disabled = false;
+      msg((res && res.msg) || "定位保存失败，请重试或回对话发『/loc 你的地址』。","err");
+    }
+  }, (err)=>{
+    $("goBtn").disabled = false;
+    msg("没拿到定位（"+(err.message||"权限被拒绝")+"）。可重试，或回对话发『/loc 你的地址』。","err");
+  }, { enableHighAccuracy:true, timeout:10000, maximumAge:0 });
+}
+$("goBtn").onclick = locate;
+if(!NONCE) msg("缺少定位票据，请从机器人的定位按钮进入。","err");
+</script>
+</body>
+</html>
