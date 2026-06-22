@@ -50,7 +50,7 @@ python -m bot.main          # 长轮询启动
 # 1) 渠道服务（Python）
 uvicorn service.app:app --host 127.0.0.1 --port 8100
 # 2) 微信桥接（Node）—— 首次扫码登录
-cd wechat && npm install && SERVICE_URL=http://127.0.0.1:8100 node bridge.mjs   # 用小号扫码（可能要输配对码）
+cd wechat && npm install && SERVICE_URL=http://127.0.0.1:8100 node bridge.mjs   # 用微信扫码（可能要输配对码）
 ```
 登录后，**用微信 → 我 → 设置 → 插件 → 微信ClawBot** 打开对话，发：
 ```
