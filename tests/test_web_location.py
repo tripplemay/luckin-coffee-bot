@@ -29,17 +29,15 @@ def test_set_location_converts_and_stores(monkeypatch):
     assert r2.status_code == 400
 
 
-def test_landing_renders_and_substitutes(monkeypatch):
+def test_landing_renders_telegram_only(monkeypatch):
     from web import app as webapp
-    monkeypatch.setattr(webapp, "get_settings",
-                        lambda: type("S", (), {"bot_username": "mybot", "wechat_id": "mywx88"})())
+    monkeypatch.setattr(webapp, "get_settings", lambda: type("S", (), {"bot_username": "mybot"})())
     with TestClient(webapp.app) as client:
         r = client.get("/")
-        qr = client.get("/wechat-qr.png")
     assert r.status_code == 200
-    assert "mybot" in r.text and "mywx88" in r.text  # 占位被替换
-    assert "{{BOT_USERNAME}}" not in r.text
-    assert qr.status_code == 404  # 仓库无 QR 图 → 404（落地页前端自动隐藏）
+    assert "mybot" in r.text and "{{BOT_USERNAME}}" not in r.text
+    assert "t.me" in r.text  # Telegram 入口在
+    assert "微信号" not in r.text  # 不再有"搜索微信号添加"那套错误引导
 
 
 def test_set_location_rejects_bad_coords(monkeypatch):

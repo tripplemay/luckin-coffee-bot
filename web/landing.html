@@ -36,17 +36,9 @@
     </div>
 
     <div class="card" id="tg">
-      <h2>📲 Telegram</h2>
+      <h2>📲 在 Telegram 打开</h2>
       <div class="sub">点下方按钮直接打开机器人，发 /start 开始。</div>
-      <a class="btn tg" id="tglink" href="#">在 Telegram 打开</a>
-    </div>
-
-    <div class="card" id="wx">
-      <h2>🟢 微信</h2>
-      <div class="sub">用微信添加下方账号，加上后发句话即可（会自动引导登录）。</div>
-      <div class="wxid" id="wxid">—</div>
-      <img class="qr" id="wxqr" src="/wechat-qr.png" alt="微信二维码" onerror="this.classList.add('hide');document.getElementById('qrhint').classList.add('hide')" />
-      <div class="qrhint" id="qrhint">长按二维码 → 识别添加</div>
+      <a class="btn tg" id="tglink" href="#">打开机器人</a>
     </div>
 
     <div class="card">
@@ -61,11 +53,9 @@
     <div class="foot">用你自己的瑞幸账号下单、各付各的。下单前都会让你确认价格。<br>个人自用项目，请合理使用。</div>
   </div>
 <script>
-  const BOT = "{{BOT_USERNAME}}", WXID = "{{WECHAT_ID}}";
+  const BOT = "{{BOT_USERNAME}}";
   if (BOT) { document.getElementById("tglink").href = "https://t.me/" + BOT; }
   else { document.getElementById("tg").classList.add("hide"); }
-  if (WXID) { document.getElementById("wxid").textContent = WXID; }
-  else { document.getElementById("wx").classList.add("hide"); }
 </script>
 </body>
 </html>

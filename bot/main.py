@@ -273,10 +273,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"🆕 新用户(TG)：{update.effective_user.full_name or uid}（{uid}）"))
         await cmd_start(update, context)  # 新用户首触(非 /start) → 引导，不当点单处理
         return
-    reason = db.gate_message(uid, db.today_cst())  # 封禁 / 每日次数上限（护 API 预算）
-    if reason:
-        await update.message.reply_text(reason)
-        return
+    if not admin.is_owner_tg(uid):  # owner 不限频/不封禁（你管着预算，自己别被卡）
+        reason = db.gate_message(uid, db.today_cst())  # 封禁 / 每日次数上限（护 API 预算）
+        if reason:
+            await update.message.reply_text(reason)
+            return
     await _handle_text(update, context, (update.message.text or "").strip())
 
 
@@ -291,10 +292,11 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"🆕 新用户(TG)：{update.effective_user.full_name or uid}（{uid}）"))
         await cmd_start(update, context)  # 新用户首触(非 /start) → 引导，不当点单处理
         return
-    reason = db.gate_message(uid, db.today_cst())  # 闸在转写前，过限不花 ASR
-    if reason:
-        await update.message.reply_text(reason)
-        return
+    if not admin.is_owner_tg(uid):  # owner 不限频
+        reason = db.gate_message(uid, db.today_cst())  # 闸在转写前，过限不花 ASR
+        if reason:
+            await update.message.reply_text(reason)
+            return
     if not asr.asr_enabled():
         await update.message.reply_text("语音功能还没开启（需配置云 ASR），先打字告诉我吧～")
         return

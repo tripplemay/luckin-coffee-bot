@@ -109,10 +109,11 @@ class ChannelCore:
         uid = _uid(user_key)
         if db.touch_user(uid, "wx", None):
             asyncio.create_task(push.notify_owner(f"🆕 新用户(微信)：{user_key}（db {uid}）"))
-            return self._onboard(user_key)  # 新用户首触 → 引导（wx-link 无好友事件，以首条消息触发）
-        reason = db.gate_message(uid, db.today_cst())  # 封禁 / 每日次数上限（护 API 预算）
-        if reason:
-            return [_text(reason)]
+            return self._onboard(user_key)  # 首触引导（单用户：通常只有 owner 自己）
+        if not admin.is_owner_wx(user_key):  # owner 不限频（微信侧本就是 owner 私人接口）
+            reason = db.gate_message(uid, db.today_cst())  # 封禁 / 每日次数上限（护 API 预算）
+            if reason:
+                return [_text(reason)]
         st = self._state(user_key)
         async with st.lock:  # 串行化同一用户的并发消息
             try:
