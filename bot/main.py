@@ -343,9 +343,11 @@ async def _handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text0
         result = await AGENT.step(messages, rec.token)
     except Exception as e:
         log.exception("agent step failed")
+        context.user_data.pop("messages", None)  # 自愈：清掉可能损坏的会话状态
+        context.user_data.pop("pending", None)
         context.application.create_task(push.notify_owner(
-            f"🐞 TG 点单出错（user {update.effective_user.id}）：{str(e)[:200]}"))
-        await update.message.reply_text("出错了，请稍后重试。")  # 不向用户回显内部异常
+            f"🐞 TG 点单出错（user {update.effective_user.id}）：{str(e)[:300]}"))
+        await update.message.reply_text("出错了，已重置当前对话，请再说一次～")
         return
     context.user_data["messages"] = result.messages
 

@@ -117,10 +117,12 @@ class ChannelCore:
         async with st.lock:  # 串行化同一用户的并发消息
             try:
                 return await self._dispatch(user_key, st, text.strip())
-            except Exception as e:  # 兜底：不向用户泄露内部细节
+            except Exception as e:  # 兜底：不向用户泄露内部细节 + 自愈（清掉可能损坏的会话状态）
                 log.exception("handle failed for %s", user_key)
-                asyncio.create_task(push.notify_owner(f"🐞 微信出错（{user_key}）：{str(e)[:200]}"))
-                return [_text("出错了，请稍后重试。")]
+                st.messages = None
+                st.pending_order = st.pending_price = st.pending_cancel = None
+                asyncio.create_task(push.notify_owner(f"🐞 微信出错（{user_key}）：{str(e)[:300]}"))
+                return [_text("出错了，已重置当前对话，请再说一次～")]
 
     async def _dispatch(self, key: str, st: UserState, text: str) -> list[dict]:
         if not text:
@@ -335,6 +337,7 @@ class ChannelCore:
             return res.text or ""
         except Exception as e:
             log.warning("resume after order failed: %s", e)
+            st.messages = None  # 收尾对话失败 → 重置会话，避免坏历史卡住后续每条消息（本次 400 的根因路径）
             return ""
 
     async def _orders(self, key: str, token: str) -> list[dict]:

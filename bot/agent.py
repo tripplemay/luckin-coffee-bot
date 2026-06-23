@@ -78,7 +78,10 @@ class OrderingAgent:
         body = {"model": self._model, "messages": messages,
                 "tools": TOOL_SCHEMAS, "tool_choice": "auto"}
         r = await self._http.post(self._url, headers={"Authorization": f"Bearer {self._key}"}, json=body)
-        r.raise_for_status()
+        if r.status_code >= 400:  # 暴露网关的真实报错体（便于诊断 400），而非吞成泛化的 raise_for_status
+            detail = r.text[:500]
+            log.warning("LLM %s: %s", r.status_code, detail)
+            raise RuntimeError(f"LLM {r.status_code}: {detail}")
         return r.json()["choices"][0]["message"]
 
     async def _dispatch(self, token: str, name: str, args_json: str) -> Any:
