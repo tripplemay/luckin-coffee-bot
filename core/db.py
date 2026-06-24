@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -43,6 +44,10 @@ CREATE TABLE IF NOT EXISTS orders (
     summary       TEXT,
     created_at    INTEGER NOT NULL,
     cancelled_at  INTEGER,
+    product_list  TEXT,                 -- 老样子复购：createOrder 的 productList JSON（可重放）
+    dept_id       TEXT,                 -- 下单门店 id
+    lng           REAL,                 -- 下单门店坐标（GCJ-02）
+    lat           REAL,
     PRIMARY KEY (tg_user_id, order_id)
 );
 CREATE TABLE IF NOT EXISTS user_location (
@@ -89,6 +94,18 @@ CREATE TABLE IF NOT EXISTS user_limits (
     daily_spend REAL,
     daily_msgs  INTEGER
 );
+CREATE TABLE IF NOT EXISTS user_prefs (
+    user_key      INTEGER PRIMARY KEY,  -- 用户点单偏好（明文；跨 TG/微信共享同 key）
+    temperature   TEXT,                 -- 默认温度 热/冰/常温
+    cup_size      TEXT,                 -- 默认杯型
+    sweetness     TEXT,                 -- 默认甜度
+    addons        TEXT,                 -- 默认加料（如 加浓缩/换燕麦奶）
+    fav_dept_id   TEXT,                 -- 常用门店 id
+    fav_dept_name TEXT,                 -- 常用门店名
+    nickname      TEXT,                 -- 称呼
+    prefs_json    TEXT,                 -- 灵活项：{"dietary":[...],"usual":[...],"notes":"..."}
+    updated_at    INTEGER NOT NULL
+);
 """
 
 
@@ -109,10 +126,14 @@ def _connect() -> sqlite3.Connection:
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(_SCHEMA)
-        # 轻量迁移：旧库的 orders 表补 cancelled_at 列
+        # 轻量迁移：旧库的 orders 表补列（逐列守卫，分别 ALTER）
         cols = [r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()]
         if "cancelled_at" not in cols:
             conn.execute("ALTER TABLE orders ADD COLUMN cancelled_at INTEGER")
+        # 老样子复购：补下单 payload 列（每列独立守卫，迁移可幂等/可断点续）
+        for col, decl in (("product_list", "TEXT"), ("dept_id", "TEXT"), ("lng", "REAL"), ("lat", "REAL")):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE orders ADD COLUMN {col} {decl}")
         # 轻量迁移：旧库的 login_nonce 表补 channel / push_target 列（登录成功回推用）
         ncols = [r[1] for r in conn.execute("PRAGMA table_info(login_nonce)").fetchall()]
         if "channel" not in ncols:
@@ -217,14 +238,61 @@ def record_spend(tg_user_id: int, day: str, amount: float, order_id: Optional[st
         )
 
 
-def record_order(tg_user_id: int, order_id: str, summary: Optional[str] = None) -> None:
+def record_order(tg_user_id: int, order_id: str, summary: Optional[str] = None,
+                 product_list: Optional[str] = None, dept_id: Optional[str] = None,
+                 lng: Optional[float] = None, lat: Optional[float] = None) -> None:
+    """记录订单。单写入口：summary 与复购 payload（product_list JSON + 门店 + 坐标）
+    都走 COALESCE upsert——后来的 NULL 不抹掉已有值（可先记 summary 再补 payload）。"""
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO orders (tg_user_id, order_id, summary, created_at) VALUES (?, ?, ?, ?) "
+            "INSERT INTO orders (tg_user_id, order_id, summary, product_list, dept_id, lng, lat, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(tg_user_id, order_id) DO UPDATE SET "
-            "summary=COALESCE(excluded.summary, orders.summary)",  # 后来的 NULL 摘要不抹掉已有标签
-            (tg_user_id, order_id, summary, int(time.time())),
+            "summary=COALESCE(excluded.summary, orders.summary), "
+            "product_list=COALESCE(excluded.product_list, orders.product_list), "
+            "dept_id=COALESCE(excluded.dept_id, orders.dept_id), "
+            "lng=COALESCE(excluded.lng, orders.lng), "
+            "lat=COALESCE(excluded.lat, orders.lat)",
+            (tg_user_id, order_id, summary, product_list, dept_id, lng, lat, int(time.time())),
         )
+
+
+def _payload_row(row: sqlite3.Row) -> dict:
+    pl = None
+    if row["product_list"]:
+        try:
+            pl = json.loads(row["product_list"])
+        except (ValueError, TypeError):
+            pl = None
+    return {
+        "order_id": row["order_id"], "summary": row["summary"],
+        "product_list": pl, "dept_id": row["dept_id"],
+        "lng": row["lng"], "lat": row["lat"], "created_at": row["created_at"],
+    }
+
+
+def get_last_order_payload(tg_user_id: int) -> Optional[dict]:
+    """最近一笔可复购的订单（未取消且存有 productList payload）。无则 None。"""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT order_id, summary, product_list, dept_id, lng, lat, created_at FROM orders "
+            "WHERE tg_user_id=? AND cancelled_at IS NULL AND product_list IS NOT NULL "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (tg_user_id,),
+        ).fetchone()
+    return _payload_row(row) if row else None
+
+
+def list_recent_payloads(tg_user_id: int, limit: int = 10) -> list[dict]:
+    """近期可复购订单（未取消、有 payload，最新在前），供「常买」选单与隐式学习。"""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT order_id, summary, product_list, dept_id, lng, lat, created_at FROM orders "
+            "WHERE tg_user_id=? AND cancelled_at IS NULL AND product_list IS NOT NULL "
+            "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            (tg_user_id, limit),
+        ).fetchall()
+    return [_payload_row(r) for r in rows]
 
 
 def mark_order_cancelled(tg_user_id: int, order_id: str) -> None:
@@ -306,6 +374,133 @@ def get_location(tg_user_id: int) -> Optional[dict]:
             "SELECT lng, lat, label FROM user_location WHERE tg_user_id=?", (tg_user_id,)
         ).fetchone()
     return {"lng": row["lng"], "lat": row["lat"], "label": row["label"]} if row else None
+
+
+# ---- 用户偏好（明文；跨渠道按 user_key 共享） ----
+
+_PREF_SCALARS = ("temperature", "cup_size", "sweetness", "addons",
+                 "fav_dept_id", "fav_dept_name", "nickname")
+_KEEP = object()  # 哨兵：该字段保持不变（区别于"传 None/'' = 清空"）
+
+
+def get_prefs(tg_user_id: Optional[int]) -> Optional[dict]:
+    """取回偏好：无记录返回 None。标量列直读，dietary/usual/notes 从 prefs_json 解出。"""
+    if tg_user_id is None:
+        return None
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT temperature, cup_size, sweetness, addons, fav_dept_id, fav_dept_name, "
+            "nickname, prefs_json FROM user_prefs WHERE user_key=?",
+            (tg_user_id,),
+        ).fetchone()
+    if not row:
+        return None
+    extra: dict = {}
+    if row["prefs_json"]:
+        try:
+            extra = json.loads(row["prefs_json"]) or {}
+        except (ValueError, TypeError):
+            extra = {}
+    out = {c: row[c] for c in _PREF_SCALARS}
+    out["dietary"] = list(extra.get("dietary") or [])
+    out["usual"] = list(extra.get("usual") or [])
+    out["notes"] = extra.get("notes")
+    return out
+
+
+def _merge_list(current: list, replace, add, remove) -> list:
+    """列表字段合并：replace(整体替换/_KEEP 不动/None 清空) → add(去重追加) → remove。"""
+    result = list(current)
+    if replace is not _KEEP:
+        result = list(replace) if replace else []
+    if add:
+        for x in add:
+            if x and x not in result:
+                result.append(x)
+    if remove:
+        result = [x for x in result if x not in set(remove)]
+    return result
+
+
+def set_prefs(tg_user_id: Optional[int], *,
+              temperature=_KEEP, cup_size=_KEEP, sweetness=_KEEP, addons=_KEEP,
+              fav_dept_id=_KEEP, fav_dept_name=_KEEP, nickname=_KEEP,
+              dietary=_KEEP, usual=_KEEP, notes=_KEEP,
+              dietary_add=None, dietary_remove=None,
+              usual_add=None, usual_remove=None) -> None:
+    """部分更新偏好（单事务 read-merge-write，跨连接原子）。
+
+    - 标量列：`_KEEP`=不动；传值（含 None/'' → 清空为 NULL）→ 设置。
+    - dietary/usual 列表：`_KEEP`=不动；传 list→整体替换；None→清空；另有 *_add/*_remove 增量。
+    - notes：`_KEEP`=不动；其它值（含空→清）→ 设置。
+    - tg_user_id 为 None → no-op（绝不写 NULL 主键）。
+    """
+    if tg_user_id is None:
+        return
+    scalars = {"temperature": temperature, "cup_size": cup_size, "sweetness": sweetness,
+               "addons": addons, "fav_dept_id": fav_dept_id, "fav_dept_name": fav_dept_name,
+               "nickname": nickname}
+    conn = _connect()
+    try:
+        conn.isolation_level = None  # 手动事务：BEGIN IMMEDIATE 抢写锁，保证 read-merge-write 原子
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT temperature, cup_size, sweetness, addons, fav_dept_id, fav_dept_name, "
+            "nickname, prefs_json FROM user_prefs WHERE user_key=?",
+            (tg_user_id,),
+        ).fetchone()
+        cur = {c: (row[c] if row else None) for c in _PREF_SCALARS}
+        extra: dict = {}
+        if row and row["prefs_json"]:
+            try:
+                extra = json.loads(row["prefs_json"]) or {}
+            except (ValueError, TypeError):
+                extra = {}
+        for col, val in scalars.items():
+            if val is not _KEEP:
+                cur[col] = val or None  # '' / None → NULL（清空单字段）
+        dlist = _merge_list(list(extra.get("dietary") or []), dietary, dietary_add, dietary_remove)
+        ulist = _merge_list(list(extra.get("usual") or []), usual, usual_add, usual_remove)
+        note_val = extra.get("notes") if notes is _KEEP else (notes or None)
+        new_extra: dict = {}
+        if dlist:
+            new_extra["dietary"] = dlist
+        if ulist:
+            new_extra["usual"] = ulist
+        if note_val:
+            new_extra["notes"] = note_val
+        prefs_json = json.dumps(new_extra, ensure_ascii=False) if new_extra else None
+        if prefs_json is None and not any(cur.values()):
+            # 合并后全空（如新用户只发了 -某项，或清空了最后一个字段）→ 删行而非留垃圾空行，
+            # 保证 get_prefs 回 None、不出"空偏好却带清空按钮"（修评审 LOW）
+            conn.execute("DELETE FROM user_prefs WHERE user_key=?", (tg_user_id,))
+            conn.execute("COMMIT")
+            return
+        conn.execute(
+            "INSERT INTO user_prefs (user_key, temperature, cup_size, sweetness, addons, "
+            "fav_dept_id, fav_dept_name, nickname, prefs_json, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(user_key) DO UPDATE SET "
+            "temperature=excluded.temperature, cup_size=excluded.cup_size, sweetness=excluded.sweetness, "
+            "addons=excluded.addons, fav_dept_id=excluded.fav_dept_id, fav_dept_name=excluded.fav_dept_name, "
+            "nickname=excluded.nickname, prefs_json=excluded.prefs_json, updated_at=excluded.updated_at",
+            (tg_user_id, cur["temperature"], cur["cup_size"], cur["sweetness"], cur["addons"],
+             cur["fav_dept_id"], cur["fav_dept_name"], cur["nickname"], prefs_json, int(time.time())),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+
+def clear_prefs(tg_user_id: Optional[int]) -> None:
+    """整行清除偏好（无记录则无害 no-op）。"""
+    if tg_user_id is None:
+        return
+    with _connect() as conn:
+        conn.execute("DELETE FROM user_prefs WHERE user_key=?", (tg_user_id,))
 
 
 def spend_today(tg_user_id: int, day: str) -> float:

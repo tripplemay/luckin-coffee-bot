@@ -31,6 +31,7 @@ from bot import flows
 from bot.agent import OrderingAgent
 from bot.mcp_client import LuckinMCPClient
 from core import admin, amap, asr, coupon, db, push
+from core import prefs as prefs_mod
 from core.config import get_settings, login_base_url
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -41,7 +42,8 @@ WELCOME = (
     "1) 登录：/login <你的瑞幸Token>（在 open.lkcoffee.com 登录后复制 Token）\n"
     "2) 设位置：/loc 你的地址（如 /loc 成都天府五街999号），或 /loc 经度,纬度\n"
     "3) 直接说想喝什么，例如「来杯热的生椰拿铁」\n"
-    "位置会被记住，下次不用重设。下单前会让你回复『确认』，不会乱扣款。其他：/orders 查订单、/cancel 取消"
+    "位置会被记住，下次不用重设。下单前会让你回复『确认』，不会乱扣款。\n"
+    "其他：/orders 查订单 · /cancel 取消 · 老样子 复购上次那单 · /prefs 我的偏好（说『以后都要热的』我也会记）"
 )
 
 
@@ -74,7 +76,9 @@ class UserState:
     pending_order: Optional[dict] = None
     pending_price: Optional[float] = None
     pending_summary: str = "订单"
+    pending_is_reorder: bool = False                 # 待确认单是否为「老样子」复购（决定确认后是否续聊）
     cancel_map: dict = field(default_factory=dict)   # 序号 -> order_id
+    reorder_map: dict = field(default_factory=dict)  # 序号 -> order_id（常买选单）
     pending_cancel: Optional[str] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -159,6 +163,13 @@ class ChannelCore:
             parts = text.split(maxsplit=1)
             return [_text(admin.admin_command(parts[1] if len(parts) > 1 else ""))]
 
+        # 偏好：查看免登录；设置/清除在待确认订单时禁止（避免改 system 与挂起 createOrder 串味）
+        if text.startswith("/prefs") or text in ("我的偏好", "偏好"):
+            intent = prefs_mod.parse_prefs_command(text)
+            if intent["action"] in ("set", "clear_all", "clear_field") and st.pending_order is not None:
+                return [_text("有一笔待确认的订单，请先回复『确认/取消』，再改偏好。")]
+            return [_text(prefs_mod.apply_prefs_command(_uid(key), text))]
+
         rec = db.get_token(_uid(key))
         if not rec:
             return [_text("请先登录：/login <你的瑞幸Token>（open.lkcoffee.com 登录后复制 Token）。")]
@@ -169,8 +180,13 @@ class ChannelCore:
                 return await self._do_order(key, st, rec.token)
             if text in _CANCEL_WORDS:
                 call = st.pending_order
+                was_reorder = st.pending_is_reorder
                 st.pending_order = st.pending_price = None
-                res = await self._agent.resume_after_confirm(st.messages, call, rec.token, approved=False)
+                st.pending_is_reorder = False
+                if was_reorder:  # 复购无对话锚点，跳过续聊（否则追加孤儿 tool 消息→400）
+                    return [_text("已取消本次下单。")]
+                res = await self._agent.resume_after_confirm(st.messages, call, rec.token,
+                                                             approved=False, user_key=_uid(key))
                 st.messages = res.messages
                 return [_text("已取消本次下单。")] + ([_text(res.text)] if res.text else [])
             return [_text("有一笔待确认的订单。回复『确认』下单，或『取消』放弃。")]
@@ -198,7 +214,8 @@ class ChannelCore:
                     return [_text(f"没找到「{arg}」，换个更具体的写法试试（带城市/区/路名）。")]
                 coords, label = (geo[0], geo[1]), geo[2]
             st.location = coords
-            st.messages = self._agent.new_conversation(coords)
+            prefs_data = db.get_prefs(_uid(key)) if get_settings().prefs_enabled else None
+            st.messages = self._agent.new_conversation(coords, prefs_data)  # 带上偏好，与 TG 一致
             db.set_location(_uid(key), coords[0], coords[1], label)
             return [_text(f"📍 已定位：{label}（{coords[0]}, {coords[1]}），想喝点什么？")]
 
@@ -210,42 +227,114 @@ class ChannelCore:
         if text.startswith("/cancel "):
             return self._cancel_select(st, text)
 
+        # 老样子复购
+        if text in ("/reorder", "老样子", "/老样子", "再来一杯", "再来一份"):
+            return await self._reorder_last(key, st, rec.token)
+        if text in ("常买", "我的常买", "/usual"):
+            return self._reorder_list(key, st)
+        if text.startswith("/reorder "):
+            return await self._reorder_select(key, st, rec.token, text)
+
         # 自然语言点单
+        return await self._order_via_agent(key, st, rec.token, text)
+
+    async def _order_via_agent(self, key: str, st: UserState, token: str, text: str) -> list[dict]:
+        """走 LLM 点单：补位置/偏好 → step → createOrder 拦截为价格确认。复购预览失败也回退到此。"""
+        uid = _uid(key)
         if not st.location:
-            saved = db.get_location(_uid(key))  # 记住的位置，免得每次重设
+            saved = db.get_location(uid)  # 记住的位置，免得每次重设
             if saved:
                 st.location = (saved["lng"], saved["lat"])
-                st.messages = self._agent.new_conversation(st.location)
-            # 无位置不再直接拦截：消息可能自带地点(交给 agent geocode)；agent 需要时会按提示词请用户 /loc 或 /here
+        prefs_data = db.get_prefs(uid) if get_settings().prefs_enabled else None
         if st.messages is None:
-            st.messages = self._agent.new_conversation(st.location)
+            st.messages = self._agent.new_conversation(st.location, prefs_data)
+        else:
+            self._agent.refresh_system(st.messages, st.location, prefs_data)  # 就地刷新偏好/位置
         st.messages.append({"role": "user", "content": text})
-        result = await self._agent.step(st.messages, rec.token)
+        result = await self._agent.step(st.messages, token, user_key=uid)
         st.messages = result.messages
         if result.kind == "text":
             return [_text(result.text or "（没听懂，换个说法试试？）")]
 
         # createOrder 拦截 → 价格确认
         preview_text, price = flows.format_preview(result.preview)
-        reason = flows.spend_guard(_uid(key), price)
+        if price is None:  # 拿不到价格 → 不进入确认态（防绕过 spend_guard）
+            return [_text("没拿到这单的价格，麻烦再说一次或换个说法～")]
+        reason = flows.spend_guard(uid, price)
         if reason:
-            res2 = await self._agent.resume_after_confirm(result.messages, result.pending_call, rec.token,
-                                                          approved=False, exec_result={"rejected": reason})
+            res2 = await self._agent.resume_after_confirm(result.messages, result.pending_call, token,
+                                                          approved=False, exec_result={"rejected": reason},
+                                                          user_key=uid)
             st.messages = res2.messages
             return [_text("⛔ " + reason)] + ([_text(res2.text)] if res2.text else [])
         st.pending_order = result.pending_call
         st.pending_price = price
         st.pending_summary = flows.preview_summary(result.preview)
+        st.pending_is_reorder = False
         return [_text(preview_text + "\n\n回复『确认』下单，或『取消』放弃。")]
+
+    async def _reorder_last(self, key: str, st: UserState, token: str) -> list[dict]:
+        payload = db.get_last_order_payload(_uid(key))
+        if not payload:
+            return [_text("你还没有可复购的订单，先点一杯吧～")]
+        return await self._present_reorder(key, st, token, payload)
+
+    def _reorder_list(self, key: str, st: UserState) -> list[dict]:
+        items = db.list_recent_payloads(_uid(key), limit=10)
+        uniq, seen = [], set()
+        for it in items:  # 按摘要去重，最近在前
+            s = it.get("summary") or "订单"
+            if s in seen:
+                continue
+            seen.add(s)
+            uniq.append(it)
+            if len(uniq) >= 5:
+                break
+        if not uniq:
+            return [_text("你还没有可复购的订单，先点一杯吧～")]
+        st.reorder_map = {str(i + 1): it["order_id"] for i, it in enumerate(uniq)}
+        lines = ["选一个复购，回复『/reorder 序号』（如 /reorder 1）；门店/价格以预览为准："]
+        for i, it in enumerate(uniq):
+            lines.append(f"{i + 1}. {it.get('summary') or '订单'}")
+        return [_text("\n".join(lines))]
+
+    async def _reorder_select(self, key: str, st: UserState, token: str, text: str) -> list[dict]:
+        idx = text.split(maxsplit=1)[1].strip()
+        order_id = st.reorder_map.get(idx)
+        if not order_id:
+            return [_text("序号无效，先发『常买』看列表。")]
+        payload = next((p for p in db.list_recent_payloads(_uid(key), limit=20)
+                        if p["order_id"] == order_id), None)
+        if not payload:
+            return [_text("该订单已不可复购。")]
+        return await self._present_reorder(key, st, token, payload)
+
+    async def _present_reorder(self, key: str, st: UserState, token: str, payload: dict) -> list[dict]:
+        """确定性复购：新预览 → spend_guard → 文本确认。预览失败回退 LLM 重搜（仍经确认门）。"""
+        result = await self._agent.build_reorder(token, payload)
+        preview_text, price = (flows.format_preview(result.preview) if result else (None, None))
+        if result is None or price is None:  # 预览失败/无可用价格 → 回退 LLM，绝不出无价确认
+            summary = payload.get("summary") or "上次那杯"
+            return await self._order_via_agent(key, st, token, f"再来一份：{summary}")
+        reason = flows.spend_guard(_uid(key), price)
+        if reason:
+            return [_text("⛔ " + reason)]
+        st.pending_order = result.pending_call
+        st.pending_price = price
+        st.pending_summary = flows.preview_summary(result.preview)
+        st.pending_is_reorder = True
+        return [_text("🔁 老样子复购（上次门店）\n" + preview_text + "\n\n回复『确认』下单，或『取消』放弃。")]
 
     async def _do_order(self, key: str, st: UserState, token: str) -> list[dict]:
         call = st.pending_order
         confirmed = st.pending_price
         summary = st.pending_summary
+        is_reorder = st.pending_is_reorder
         # 真实下单（花钱）；成功返回后**立即**清空挂起态，杜绝后续任何异常导致二次下单
-        create_result = await self._agent.execute_pending(token, call)
+        create_result = await self._agent.execute_pending(token, call, user_key=_uid(key))
         st.pending_order = None
         st.pending_price = None
+        st.pending_is_reorder = False
 
         text, qr, order_id, need_pay, pay_page = flows.format_order_created(create_result)
         actual = flows.created_price(create_result)
@@ -255,12 +344,26 @@ class ChannelCore:
         if higher:
             over = flows.spend_guard(_uid(key), actual)
             if over and order_id:
+                cancelled = False
                 try:
-                    await self._mcp.call_tool(token, "cancelOrder", {"orderId": order_id})
+                    cxl = await self._mcp.call_tool(token, "cancelOrder", {"orderId": order_id})
+                    cancelled = flows.cancel_succeeded(cxl)
                 except Exception as e:
                     log.warning("auto-cancel over-limit order %s failed: %s", order_id, e)
-                await self._safe_resume(st, call, token, create_result)
-                return [_text(f"⚠️ 实付 ¥{actual:.2f} 超出单日上限（{over}），已尝试自动取消该订单，请在瑞幸 App 核对，未扣款勿支付。")]
+                # 无论取消是否成功都落库，确保订单可查可追溯（修评审 MEDIUM）
+                pl = flows.reorder_payload_from_call(call)
+                db.record_order(_uid(key), order_id, summary, product_list=pl["product_list"],
+                                dept_id=pl["dept_id"], lng=pl["lng"], lat=pl["lat"])
+                if not is_reorder:
+                    await self._safe_resume(st, call, token, create_result, _uid(key))
+                if cancelled:
+                    db.mark_order_cancelled(_uid(key), order_id)
+                    return [_text(f"⛔ 实付 ¥{actual:.2f} 超出单日上限（{over}），已自动取消该订单，未扣款。")]
+                # 取消未确认成功：计入当日额度，提示手动取消，不谎称"未扣款"
+                if record_price := (actual if actual is not None else confirmed):
+                    db.record_spend(_uid(key), db.today_cst(), record_price, order_id)
+                return [_text(f"⛔ 实付 ¥{actual:.2f} 超出单日上限（{over}），但自动取消未成功。"
+                              f"请在瑞幸 App 手动取消该订单（#{order_id[-6:]}），未支付请勿付款。")]
 
         record_price = actual if actual is not None else confirmed
         acts: list[dict] = []
@@ -269,11 +372,13 @@ class ChannelCore:
         elif actual is None:
             log.warning("createOrder %s 无 discountPrice，按确认价记账", order_id)
         if order_id:
-            db.record_order(_uid(key), order_id, summary)
+            payload = flows.reorder_payload_from_call(call)  # 落库可复购 payload（不含旧券）
+            db.record_order(_uid(key), order_id, summary, product_list=payload["product_list"],
+                            dept_id=payload["dept_id"], lng=payload["lng"], lat=payload["lat"])
             if record_price:  # 微信版无轮询，下单即记账（偏保守，安全）
                 db.record_spend(_uid(key), db.today_cst(), record_price, order_id)
 
-        closing = await self._safe_resume(st, call, token, create_result)
+        closing = "" if is_reorder else await self._safe_resume(st, call, token, create_result, _uid(key))
         acts.append(_text(text))
         if need_pay and qr:
             acts.append(_qr_action(qr, "微信扫码支付（长按识别二维码）"))
@@ -282,6 +387,9 @@ class ChannelCore:
         acts.append(_text("支付后回复『查订单』查看状态和取餐码。"))
         if closing:
             acts.append(_text(closing))
+        sug = prefs_mod.suggest_usual(_uid(key))  # 隐式学习建议（默认关）
+        if sug:
+            acts.append(_text(sug))
         return acts
 
     async def _coupon(self, key: str) -> list[dict]:
@@ -305,7 +413,7 @@ class ChannelCore:
                "1) 先登录瑞幸账号（点下方链接，手机号+短信，免粘贴 Token）\n"
                "2) 发『/loc 你的地址』或『/here』设置位置\n"
                "3) 直接说想喝什么，例如「来杯热的生椰拿铁」\n"
-               "下单前会让你确认价格，不会乱扣款 👍　其他：/orders 查单 · /福利 领券")
+               "下单前会让你确认价格，不会乱扣款 👍　其他：/orders 查单 · /福利 领券 · 老样子 复购 · /prefs 偏好")
         acts = [_text(msg)]
         base = login_base_url()
         if base:
@@ -330,10 +438,12 @@ class ChannelCore:
         """地址 → (lng, lat, formatted)，GCJ-02。委托 core.amap（与 agent 的 geocodeAddress 同源）。"""
         return await amap.geocode_address(address)
 
-    async def _safe_resume(self, st: UserState, call: dict, token: str, create_result) -> str:
+    async def _safe_resume(self, st: UserState, call: dict, token: str, create_result,
+                           user_key: Optional[int] = None) -> str:
         """续聊拿收尾文本；失败只影响提示，绝不影响已下的单。"""
         try:
-            res = await self._agent.resume_after_confirm(st.messages, call, token, approved=True, exec_result=create_result)
+            res = await self._agent.resume_after_confirm(st.messages, call, token, approved=True,
+                                                         exec_result=create_result, user_key=user_key)
             st.messages = res.messages
             return res.text or ""
         except Exception as e:

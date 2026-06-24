@@ -123,6 +123,24 @@ def format_order_status(resp: Any) -> str:
     return "\n".join(lines)
 
 
+def reorder_payload_from_call(call: Any) -> dict:
+    """从 createOrder tool_call 抽取可复购 payload（productList JSON / deptId / 坐标），下单后落库。
+
+    只取重放所需字段，**不含 couponCodeList**（券须复购时按新预览重配，旧券会过期）。
+    """
+    import json
+    try:
+        args = json.loads(call["function"].get("arguments", "{}"))
+    except (KeyError, TypeError, ValueError):
+        args = {}
+    pl = args.get("productList")
+    return {
+        "product_list": json.dumps(pl, ensure_ascii=False) if pl else None,
+        "dept_id": str(args["deptId"]) if args.get("deptId") is not None else None,
+        "lng": args.get("longitude"), "lat": args.get("latitude"),
+    }
+
+
 def preview_summary(resp: Any) -> str:
     """从 previewOrder 提取一句话商品摘要，存进订单历史。"""
     data = unwrap(resp)

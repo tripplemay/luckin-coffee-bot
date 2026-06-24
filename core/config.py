@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     asr_api_key: str = ""     # 单 key 厂商（阿里 DashScope）
     asr_app_id: str = ""      # 讯飞 APPID / 腾讯 SecretId
     asr_api_secret: str = ""  # 讯飞 APISecret / 腾讯 SecretKey
+    # ---- 用户偏好 + 老样子复购 ----
+    prefs_enabled: bool = True          # 总开关：偏好读写 + 注入提示词
+    prefs_max_items: int = 20           # 偏好注入提示词的条目上限（控上下文成本）
+    implicit_learning_enabled: bool = False  # 隐式学习：某商品点≥N 次→建议设为常买（默认关）
 
 
 @lru_cache

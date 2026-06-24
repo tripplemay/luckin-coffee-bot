@@ -32,6 +32,7 @@ from bot import flows, ui
 from bot.agent import OrderingAgent
 from bot.mcp_client import LuckinMCPClient
 from core import admin, asr, db, push
+from core import prefs as prefs_mod
 from core.config import get_settings, login_base_url
 from core.geo import wgs84_to_gcj02
 
@@ -121,7 +122,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         + ("（点下方按钮，手机号+短信，免粘贴）" if kb else "：把你的 Token 发给我 `/login <token>`")
         + "\n2) 点「📍 发送我的位置」分享定位\n"
         "3) 直接说想喝什么，比如「来杯热的生椰拿铁」\n\n"
-        "下单前我会显示价格让你确认，不会乱扣款 👍"
+        "下单前我会显示价格让你确认，不会乱扣款 👍\n"
+        "小技巧：说「以后都要热的」我会记住偏好（/prefs 查看）；下次发「老样子」一键复购上次那单。"
     )
     await update.message.reply_text(text, reply_markup=kb)
     await update.message.reply_text("分享位置 👇", reply_markup=ui.location_keyboard())
@@ -145,6 +147,121 @@ async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"你的 Telegram id：`{update.effective_user.id}`",
                                     parse_mode="Markdown")
+
+
+async def cmd_prefs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """查看/设置/清除点单偏好（无需登录）。设置/清除在待确认订单时禁止。"""
+    uid = update.effective_user.id
+    if db.touch_user(uid, "tg", update.effective_user.full_name):  # 命令绕过 on_text 的建档/告警，补上
+        context.application.create_task(push.notify_owner(
+            f"🆕 新用户(TG)：{update.effective_user.full_name or uid}（{uid}）"))
+    text = (update.message.text or "").strip()
+    intent = prefs_mod.parse_prefs_command(text)
+    if intent["action"] in ("set", "clear_all", "clear_field") and context.user_data.get("pending"):
+        await update.message.reply_text("有一笔待确认的订单，请先点『确认/取消』，再改偏好。")
+        return
+    reply = prefs_mod.apply_prefs_command(uid, text)
+    kb = ui.prefs_keyboard() if (intent["action"] == "view" and db.get_prefs(uid)) else None
+    await update.message.reply_text(reply, reply_markup=kb)
+
+
+async def on_prefs_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    if q.data == "prefs:clearall":
+        if context.user_data.get("pending"):
+            await q.edit_message_text("有一笔待确认的订单，请先点『确认/取消』，再改偏好。")
+            return
+        db.clear_prefs(q.from_user.id)
+        await q.edit_message_text("已清空全部偏好。")
+
+
+async def cmd_reorder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """老样子：复购最近一笔订单（仍走价格确认）。"""
+    rec = _require_token(update.effective_user.id)
+    if not rec:
+        await update.message.reply_text("请先登录：/login <你的瑞幸Token>。")
+        return
+    payload = db.get_last_order_payload(update.effective_user.id)
+    if not payload:
+        await update.message.reply_text("你还没有可复购的订单，先点一杯吧～")
+        return
+    await _present_reorder(update, context, rec, payload)
+
+
+async def _present_reorder(update: Update, context: ContextTypes.DEFAULT_TYPE, rec, payload: dict) -> None:
+    """确定性复购：新预览 → spend_guard → 确认按钮。预览失败回退 LLM 重搜（仍经确认门）。"""
+    uid = update.effective_user.id
+    await context.bot.send_chat_action(update.effective_chat.id, "typing")
+    result = await AGENT.build_reorder(rec.token, payload)
+    text, price = (flows.format_preview(result.preview) if result else (None, None))
+    if result is None or price is None:  # 预览失败/无可用价格 → 回退 LLM，绝不出 ¥0 确认
+        summary = payload.get("summary") or "上次那杯"
+        await _handle_text(update, context, f"再来一份：{summary}")
+        return
+    reason = flows.spend_guard(uid, price)
+    if reason:
+        await update.message.reply_text("⛔ " + reason)
+        return
+    context.user_data["pending"] = {"call": result.pending_call, "price": price,
+                                    "summary": flows.preview_summary(result.preview), "reorder": True}
+    await update.message.reply_text("🔁 老样子复购（上次门店）\n" + text + "\n\n确认下单吗？",
+                                    reply_markup=ui.confirm_order_keyboard(price))
+
+
+async def cmd_usual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """常买：列出近期可复购订单，点按钮选一个复购。"""
+    rec = _require_token(update.effective_user.id)
+    if not rec:
+        await update.message.reply_text("请先登录：/login <你的瑞幸Token>。")
+        return
+    items = db.list_recent_payloads(update.effective_user.id, limit=10)
+    uniq, seen = [], set()
+    for it in items:
+        s = it.get("summary") or "订单"
+        if s in seen:
+            continue
+        seen.add(s)
+        uniq.append(it)
+        if len(uniq) >= 5:
+            break
+    if not uniq:
+        await update.message.reply_text("你还没有可复购的订单，先点一杯吧～")
+        return
+    buttons = [[InlineKeyboardButton(f"🔁 {it.get('summary') or '订单'}", callback_data=f"reorder:{it['order_id']}")]
+               for it in uniq]
+    await update.message.reply_text("选一个复购（上次门店、价格以预览为准）：",
+                                    reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def on_reorder_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    rec = _require_token(q.from_user.id)
+    if not rec:
+        await q.edit_message_text("请先登录后再操作。")
+        return
+    order_id = q.data.split(":", 1)[1]
+    payload = next((p for p in db.list_recent_payloads(q.from_user.id, limit=20)
+                    if p["order_id"] == order_id), None)
+    if not payload:
+        await q.edit_message_text("该订单已不可复购。")
+        return
+    await q.edit_message_text("⏳ 正在准备复购…")
+    result = await AGENT.build_reorder(rec.token, payload)
+    text, price = (flows.format_preview(result.preview) if result else (None, None))
+    if result is None or price is None:  # 预览失败/无价 → 让用户用文字重点（回退）
+        await q.message.reply_text("这杯的商品/门店可能变了，直接说『再来一份" +
+                                   (payload.get("summary") or "") + "』我帮你重点～")
+        return
+    reason = flows.spend_guard(q.from_user.id, price)
+    if reason:
+        await q.message.reply_text("⛔ " + reason)
+        return
+    context.user_data["pending"] = {"call": result.pending_call, "price": price,
+                                    "summary": flows.preview_summary(result.preview), "reorder": True}
+    await q.message.reply_text("🔁 老样子复购（上次门店）\n" + text + "\n\n确认下单吗？",
+                               reply_markup=ui.confirm_order_keyboard(price))
 
 
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -261,7 +378,8 @@ async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Telegram 原生定位是 WGS-84，瑞幸/高德按 GCJ-02 检索门店 → 必须转换，否则偏 100~500m
     coords = wgs84_to_gcj02(loc.longitude, loc.latitude)
     context.user_data["location"] = coords
-    context.user_data["messages"] = AGENT.new_conversation(coords)
+    prefs_data = db.get_prefs(update.effective_user.id) if get_settings().prefs_enabled else None
+    context.user_data["messages"] = AGENT.new_conversation(coords, prefs_data)
     db.set_location(update.effective_user.id, coords[0], coords[1], "我的位置")  # 落库，重启不丢
     await update.message.reply_text("📍 位置已记录，想喝点什么？", reply_markup=ReplyKeyboardRemove())
 
@@ -323,6 +441,9 @@ async def _handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text0
     if text0 in ("定位", "位置", "改位置", "重新定位"):
         await cmd_here(update, context)
         return
+    if text0 in ("我的偏好", "偏好"):  # 查看偏好免登录（与 /prefs 同源）
+        await cmd_prefs(update, context)
+        return
     rec = _require_token(update.effective_user.id)
     if not rec:
         kb = _login_kb(update.effective_user.id, update.effective_chat.id)
@@ -331,18 +452,36 @@ async def _handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text0
             else "请先登录：/login <你的瑞幸Token>。",
             reply_markup=kb)
         return
+    # 待确认订单是模态的：先点确认/取消按钮，别让新文字覆盖 pending（与微信侧对齐，防旧按钮触发新单）
+    if context.user_data.get("pending"):
+        await update.message.reply_text("有一笔待确认的订单，请先点上方『✅ 确认 / ❌ 取消』按钮，再继续～")
+        return
+    if text0 in ("老样子", "再来一杯", "再来一份"):  # 复购需登录，故放在 token 门之后
+        await cmd_reorder(update, context)
+        return
+    if text0 in ("常买", "我的常买"):
+        await cmd_usual(update, context)
+        return
+    uid = update.effective_user.id
     # 内存没有位置时，回落到上次落库的位置（重启/换会话也不用重设）
-    if not context.user_data.get("location"):
-        saved = db.get_location(update.effective_user.id)
+    loc = context.user_data.get("location")
+    if not loc:
+        saved = db.get_location(uid)
         if saved:
-            context.user_data["location"] = (saved["lng"], saved["lat"])
-            context.user_data["messages"] = AGENT.new_conversation((saved["lng"], saved["lat"]))
+            loc = (saved["lng"], saved["lat"])
+            context.user_data["location"] = loc
         # 无位置不再强弹定位：消息可能自带地点(交给 agent geocode)；agent 需要时会按提示词请用户 /here
-    messages = context.user_data.get("messages") or AGENT.new_conversation(context.user_data.get("location"))
+    prefs_data = db.get_prefs(uid) if get_settings().prefs_enabled else None
+    messages = context.user_data.get("messages")
+    if messages is None:
+        messages = AGENT.new_conversation(loc, prefs_data)
+    else:
+        AGENT.refresh_system(messages, loc, prefs_data)  # 就地刷新偏好/位置，保留对话尾
+    context.user_data["messages"] = messages
     messages.append({"role": "user", "content": text0})
     await context.bot.send_chat_action(update.effective_chat.id, "typing")
     try:
-        result = await AGENT.step(messages, rec.token)
+        result = await AGENT.step(messages, rec.token, user_key=uid)
     except Exception as e:
         log.exception("agent step failed")
         context.user_data.pop("messages", None)  # 自愈：清掉可能损坏的会话状态
@@ -359,10 +498,13 @@ async def _handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text0
 
     # createOrder 拦截 → 价格确认护栏
     text, price = flows.format_preview(result.preview)
+    if price is None:  # 拿不到价格 → 不出 ¥0 确认按钮（防绕过 spend_guard）
+        await update.message.reply_text("没拿到这单的价格，麻烦再说一次或换个说法～")
+        return
     reason = flows.spend_guard(update.effective_user.id, price)
     if reason:
         res2 = await AGENT.resume_after_confirm(result.messages, result.pending_call, rec.token,
-                                                approved=False, exec_result={"rejected": reason})
+                                                approved=False, exec_result={"rejected": reason}, user_key=uid)
         context.user_data["messages"] = res2.messages
         await update.message.reply_text("⛔ " + reason)
         if res2.text:
@@ -377,17 +519,23 @@ async def _handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text0
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
+    uid = q.from_user.id
     pending = context.user_data.get("pending")
     messages = context.user_data.get("messages")
-    rec = _require_token(q.from_user.id)
-    if not pending or not rec or messages is None:
+    rec = _require_token(uid)
+    is_reorder = bool(pending and pending.get("reorder"))
+    # 复购无对话锚点，不需要 messages；普通单需要 messages 才能续聊
+    if not pending or not rec or (messages is None and not is_reorder):
         await q.edit_message_text("会话已过期，请重新点单。")
         return
 
     if q.data == "order:cancel":
-        res = await AGENT.resume_after_confirm(messages, pending["call"], rec.token, approved=False)
-        context.user_data["messages"] = res.messages
         context.user_data.pop("pending", None)
+        if is_reorder:  # 复购取消：无续聊（否则追加孤儿 tool 消息→400）
+            await q.edit_message_text("已取消本次下单。")
+            return
+        res = await AGENT.resume_after_confirm(messages, pending["call"], rec.token, approved=False, user_key=uid)
+        context.user_data["messages"] = res.messages
         await q.edit_message_text("已取消本次下单。")
         if res.text:
             await q.message.reply_text(res.text)
@@ -395,22 +543,51 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # 确认 → 执行 createOrder（我们自己执行以拿到二维码并记账）
     await q.edit_message_text("⏳ 正在为你下单…")
-    create_result = await AGENT.execute_pending(rec.token, pending["call"])
+    create_result = await AGENT.execute_pending(rec.token, pending["call"], user_key=uid)
     text, qr, order_id, need_pay, pay_page = flows.format_order_created(create_result)
 
-    # 价格一致性兜底：实际下单价高于确认价（如优惠未生效）→ 显著告警
+    # 价格一致性兜底：实际下单价高于确认价（如优惠未生效）
     confirmed = pending.get("price")
     actual = flows.created_price(create_result)
+    over_limit = None
     if confirmed is not None and actual is not None and actual > confirmed + 0.01:
         await q.message.reply_text(
-            f"⚠️ 注意：实际下单金额 ¥{actual:.2f} 高于确认价 ¥{confirmed:.2f}（优惠可能未生效）。"
-            f"\n若还没支付，可在瑞幸 App 取消该订单。")
+            f"⚠️ 注意：实际下单金额 ¥{actual:.2f} 高于确认价 ¥{confirmed:.2f}（优惠可能未生效）。")
+        over_limit = flows.spend_guard(uid, actual)  # 用实付价重核单日上限
     record_price = actual if actual is not None else confirmed
+    _pl = flows.reorder_payload_from_call(pending["call"]) if order_id else None
+
+    if over_limit and order_id:  # 超额 → 尝试自动取消（与微信侧对齐），赶在扫码前
+        cancelled = False
+        try:
+            cxl = await MCP.call_tool(rec.token, "cancelOrder", {"orderId": order_id})
+            cancelled = flows.cancel_succeeded(cxl)
+        except Exception as e:
+            log.warning("auto-cancel over-limit order %s failed: %s", order_id, e)
+        # 无论取消是否成功都落库，确保订单可在 /orders /cancel 看到、可追溯（修评审 MEDIUM）
+        db.record_order(uid, order_id, pending.get("summary"), product_list=_pl["product_list"],
+                        dept_id=_pl["dept_id"], lng=_pl["lng"], lat=_pl["lat"])
+        context.user_data.pop("pending", None)
+        context.user_data.pop("messages", None)  # 重置会话，避免"已取消"与续聊矛盾
+        if cancelled:
+            db.mark_order_cancelled(uid, order_id)
+            await q.message.reply_text(f"⛔ 实付超出单日上限（{over_limit}），已自动取消该订单，未扣款。")
+        else:  # 取消未确认成功：计入当日额度，提示手动取消，不谎称"未扣款"
+            if record_price:
+                db.record_spend(uid, db.today_cst(), record_price, order_id)
+            await q.message.reply_text(
+                f"⛔ 实付超出单日上限（{over_limit}），但自动取消未成功。"
+                f"请在瑞幸 App 手动取消该订单（#{order_id[-6:]}），未支付请勿付款。")
+        return
+
     if order_id:
-        db.record_order(q.from_user.id, order_id, pending.get("summary"))
+        db.record_order(uid, order_id, pending.get("summary"), product_list=_pl["product_list"],
+                        dept_id=_pl["dept_id"], lng=_pl["lng"], lat=_pl["lat"])
         # 已被券/余额全额支付(needPay=false)立即记账；需支付的单留给轮询在确认到账后记
         if not need_pay and record_price:
-            db.record_spend(q.from_user.id, db.today_cst(), record_price, order_id)
+            db.record_spend(uid, db.today_cst(), record_price, order_id)
+
+    context.user_data.pop("pending", None)
     await q.message.reply_text(text)
     if need_pay and qr:
         page_kb = (InlineKeyboardMarkup([[InlineKeyboardButton("📱 同屏无法扫码？点此打开支付页", url=pay_page)]])
@@ -418,12 +595,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await context.bot.send_photo(q.message.chat_id, ui.make_qr_png(qr),
                                      caption="微信扫码直接支付", reply_markup=page_kb)
 
-    res = await AGENT.resume_after_confirm(messages, pending["call"], rec.token,
-                                           approved=True, exec_result=create_result)
-    context.user_data["messages"] = res.messages
-    context.user_data.pop("pending", None)
-    if res.text:
-        await q.message.reply_text(res.text)
+    if not is_reorder:  # 复购无对话锚点，跳过续聊
+        res = await AGENT.resume_after_confirm(messages, pending["call"], rec.token,
+                                               approved=True, exec_result=create_result, user_key=uid)
+        context.user_data["messages"] = res.messages
+        if res.text:
+            await q.message.reply_text(res.text)
+
+    sug = prefs_mod.suggest_usual(uid)  # 隐式学习建议（默认关）
+    if sug:
+        await q.message.reply_text(sug)
 
     if order_id:
         spend_kwargs = {}
@@ -453,8 +634,13 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("here", cmd_here))
     app.add_handler(CommandHandler("whoami", cmd_whoami))
     app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CommandHandler("prefs", cmd_prefs))
+    app.add_handler(CommandHandler("reorder", cmd_reorder))
+    app.add_handler(CommandHandler("usual", cmd_usual))
     app.add_handler(MessageHandler(filters.LOCATION, on_location))
     app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^order:"))
+    app.add_handler(CallbackQueryHandler(on_prefs_cb, pattern=r"^prefs:"))
+    app.add_handler(CallbackQueryHandler(on_reorder_select, pattern=r"^reorder:"))
     app.add_handler(CallbackQueryHandler(on_cancel_select, pattern=r"^cancel:"))
     app.add_handler(CallbackQueryHandler(on_cancel_do, pattern=r"^cxldo:"))
     app.add_handler(CallbackQueryHandler(on_cancel_abort, pattern=r"^cxlno$"))

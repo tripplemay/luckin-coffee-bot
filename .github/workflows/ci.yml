@@ -16,4 +16,7 @@ jobs:
       - name: Install
         run: pip install -e ".[dev]"
       - name: Test
-        run: pytest -q
+        # TZ=UTC 复现服务器时区：确保按天计数/消费护栏的 today_cst() 边界正确（部分测试时区敏感）。
+        # 覆盖率门禁锁在 core（共享大脑+存储+偏好，当前 ~84%）。bot/service 驱动层有历史 IO 欠测，
+        # 暂不计入全局门禁；待后续补 PTB/桥接测试再纳入。
+        run: TZ=UTC pytest --cov=core --cov-report=term-missing --cov-fail-under=80 -q

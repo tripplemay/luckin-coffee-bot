@@ -39,6 +39,11 @@ def confirm_order_keyboard(price: float) -> InlineKeyboardMarkup:
     ]])
 
 
+def prefs_keyboard() -> InlineKeyboardMarkup:
+    """偏好查看时附带的快捷操作（清空全部）。逐项设置/清除走文本 /prefs set|clear。"""
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🗑 清空全部偏好", callback_data="prefs:clearall")]])
+
+
 def make_qr_png(data: str) -> BytesIO:
     img = qrcode.make(data)
     buf = BytesIO()
